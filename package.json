@@ -1,0 +1,27 @@
+{
+  "name": "levante-digital",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1",
+    "build": "astro build",
+    "preview": "astro preview --host 127.0.0.1",
+    "check": "astro check",
+    "test": "tsx --test tests/*.test.ts",
+    "assets": "python scripts/convert-assets.py",
+    "test:browser": "node scripts/verify-browser.mjs",
+    "verify": "npm run check && npm test && npm run build"
+  },
+  "dependencies": {
+    "astro": "latest",
+    "ogl": "^1.0.11"
+  },
+  "devDependencies": {
+    "@astrojs/check": "latest",
+    "@playwright/test": "latest",
+    "@types/node": "^22.20.5",
+    "tsx": "latest",
+    "typescript": "^5.9.3"
+  }
+}

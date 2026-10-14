@@ -1,0 +1,32 @@
+---
+import Hero from '../components/Hero.astro';
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Levante Digital — Estrategia, diseño y automatización</title>
+    <meta name="description" content="Levante Digital. Diseño web, automatización e inteligencia artificial para conectar tu negocio con nuevas oportunidades." />
+    <meta name="theme-color" content="#b98e60" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23b98e60'/%3E%3Cpath d='M8 8v16h16' fill='none' stroke='white' stroke-width='4'/%3E%3C/svg%3E" />
+    <link rel="preload" as="image" href="/assets/images/fondo-def.webp" />
+  </head>
+  <body>
+    <main>
+      <Hero />
+      <section class="prototype" aria-label="Controles del prototipo">
+        <div>
+          <p class="eyebrow">LEVANTE DIGITAL · PRIMERA EXPLORACIÓN</p>
+          <p class="prototype__instruction">La cortina fluye como una cascada de partículas. Interrumpe su caída con el cursor o toca la arena del marco.</p>
+        </div>
+        <div class="prototype__actions">
+          <button type="button" data-sand-toggle aria-pressed="false">Pausar animación</button>
+          <button type="button" data-sand-reset>Reiniciar animación <span aria-hidden="true">↺</span></button>
+        </div>
+        <p class="prototype__status" data-sand-status role="status" aria-live="polite">Preparando la experiencia…</p>
+      </section>
+    </main>
+  </body>
+</html>

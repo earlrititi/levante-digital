@@ -1,0 +1,82 @@
+[
+  {
+    "source": "fondo hero.svg",
+    "webp": "fondo-hero.webp",
+    "width": 1920,
+    "height": 1080,
+    "originalBytes": 1655428,
+    "webpBytes": 87104,
+    "lossless": false,
+    "alphaVerified": true
+  },
+  {
+    "source": "noise hero.svg",
+    "webp": "noise-hero.webp",
+    "width": 1920,
+    "height": 1080,
+    "originalBytes": 5176260,
+    "webpBytes": 194730,
+    "lossless": false,
+    "alphaVerified": true
+  },
+  {
+    "source": "Marco Hero.png",
+    "webp": "marco-hero.webp",
+    "width": 1769,
+    "height": 929,
+    "originalBytes": 2423097,
+    "webpBytes": 27714,
+    "lossless": true,
+    "alphaVerified": true
+  },
+  {
+    "source": "marco.svg",
+    "webp": "marco.webp",
+    "width": 1774,
+    "height": 942,
+    "originalBytes": 3182460,
+    "webpBytes": 140,
+    "lossless": true,
+    "alphaVerified": true
+  },
+  {
+    "source": "Logo Hero.svg",
+    "webp": "logo-hero.webp",
+    "width": 1200,
+    "height": 443,
+    "originalBytes": 197309,
+    "webpBytes": 74500,
+    "lossless": true,
+    "alphaVerified": true
+  },
+  {
+    "source": "cortina.svg",
+    "webp": "cortina.webp",
+    "width": 1644,
+    "height": 1080,
+    "originalBytes": 1345125,
+    "webpBytes": 247778,
+    "lossless": true,
+    "alphaVerified": true
+  },
+  {
+    "source": "fondo def.png",
+    "webp": "fondo-def.webp",
+    "width": 1672,
+    "height": 941,
+    "originalBytes": 1988877,
+    "webpBytes": 113432,
+    "lossless": false,
+    "alphaVerified": true
+  },
+  {
+    "source": "cortina_def.png",
+    "webp": "cortina-def.webp",
+    "width": 1672,
+    "height": 941,
+    "originalBytes": 835313,
+    "webpBytes": 526552,
+    "lossless": true,
+    "alphaVerified": true
+  }
+]

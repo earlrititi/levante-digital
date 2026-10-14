@@ -1,0 +1,617 @@
+import { chromium } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+
+const baseURL = new URL(process.env.PREVIEW_URL || 'http://127.0.0.1:4321/');
+baseURL.searchParams.set('sand-debug', '1');
+await mkdir('artifacts', { recursive: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE,
+  args: ['--enable-unsafe-swiftshader'] });
+const errors = [], failedRequests = [], results = {};
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+page.setDefaultTimeout(12000);
+page.on('pageerror', error => errors.push(error.message));
+page.on('console', message => {
+  if (message.type() === 'error' || (message.type() === 'warning' && /shader|framebuffer/i.test(message.text()))) errors.push(message.text());
+});
+page.on('requestfailed', request => failedRequests.push(request.url()));
+const metrics = () => page.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+const stateSummary = () => page.evaluate(() => {
+  const state = window.__sandGpu.snapshot();
+  let contacts = 0, falling = 0, activeSparks = 0, finite = true;
+  for (let i = 0; i < state.count; i++) {
+    contacts += state.positions[i * 4 + 2]; falling += state.positions[i * 4 + 3];
+    for (let j = 0; j < 4; j++) finite &&= Number.isFinite(state.positions[i * 4 + j]) && Number.isFinite(state.velocities[i * 4 + j]);
+  }
+  for (let i = 0; i < state.sparks.count; i++) {
+    const offset = i * 4;
+    if (state.sparks.positions[offset + 3] >= 0 && state.sparks.velocities[offset + 3] < state.sparks.velocities[offset + 2]) activeSparks++;
+    for (let j = 0; j < 4; j++) finite &&= Number.isFinite(state.sparks.positions[offset + j]) && Number.isFinite(state.sparks.velocities[offset + j]);
+  }
+  return { count: state.count, contacts, falling, activeSparks, finite };
+});
+try {
+  assert.equal((await page.goto(baseURL.href)).status(), 200);
+  await page.waitForSelector('[data-sand-ready="true"]');
+  await page.waitForTimeout(300);
+  results.initial = await metrics();
+  assert.equal(results.initial.sandEngine, 'gpu');
+  assert.equal(Number(results.initial.sandParticles), 32768);
+  assert.equal(Number(results.initial.sandSparks), 16384);
+  assert.equal(results.initial.sandStyle, 'luminous');
+  assert.equal(Number(results.initial.sandSpeed), .8);
+  assert.equal(Number(results.initial.sandCursorRadius), 10);
+  assert.equal(results.initial.logoRendering, 'vector');
+  assert.equal(results.initial.logoEffect, 'none');
+  assert.equal(results.initial.logoParticles, undefined);
+  assert.equal(results.initial.curtainReady, 'true');
+  assert.equal(results.initial.curtainEffect, 'particle-waterfall');
+  assert.equal(Number(results.initial.curtainParticles), 131072);
+  assert.equal(Number(results.initial.curtainGravity), 981);
+  assert.equal(results.initial.curtainPoints, undefined);
+  assert.equal(results.initial.curtainLines, undefined);
+  assert.equal(await page.locator('[data-curtain-canvas]').count(), 0);
+  assert.equal(await page.locator('[data-logo-image]').getAttribute('src'), '/assets/images/logo-hero-vector.svg');
+  results.logoVectorAsset = await page.evaluate(async () => {
+    const image = document.querySelector('[data-logo-image]');
+    const xml = new DOMParser().parseFromString(await (await fetch(image.src)).text(), 'image/svg+xml');
+    const original = new Image(); original.src = '/assets/images/logo-hero.webp'; await original.decode();
+    const canvas = document.createElement('canvas'); canvas.width = original.naturalWidth; canvas.height = original.naturalHeight;
+    const context = canvas.getContext('2d'); context.drawImage(original, 0, 0);
+    const before = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const after = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let intersection = 0, union = 0;
+    for (let i = 3; i < before.length; i += 4) {
+      const a = before[i] >= 128, b = after[i] >= 128;
+      if (a && b) intersection++; if (a || b) union++;
+    }
+    return { paths: xml.querySelectorAll('path').length, embeddedImages: xml.querySelectorAll('image').length,
+      silhouetteOverlap: intersection / union };
+  });
+  assert.ok(results.logoVectorAsset.paths > 0);
+  assert.equal(results.logoVectorAsset.embeddedImages, 0);
+  assert.ok(results.logoVectorAsset.silhouetteOverlap > .98, 'The vector contours must preserve the supplied brand silhouette');
+  assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+  assert.equal(await page.locator('img[src*="marco"]').count(), 0);
+  assert.equal(await page.locator('[data-sand-frame]').isVisible(), false);
+  results.curtainArtwork = await page.evaluate(async () => {
+    const state = window.__sandGpu.curtain(), image = document.querySelector('[data-curtain-image]');
+    const background = document.querySelector('.hero__background'), hero = document.querySelector('[data-sand-hero]');
+    await Promise.all([image.decode(), background.decode()]);
+    const style = getComputedStyle(image), scale = Math.max(hero.clientWidth / 1672, hero.clientHeight / 941);
+    return { count: state.count, gravity: state.gravity, rect: state.rect,
+      expected: { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2,
+        width: 1672 * scale, height: 941 * scale },
+      source: new URL(image.src).pathname, background: new URL(background.src).pathname,
+      sourceSize: [image.naturalWidth, image.naturalHeight], backgroundSize: [background.naturalWidth, background.naturalHeight],
+      imageWidth: state.imageWidth, imageHeight: state.imageHeight,
+      fallbackHidden: style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0,
+      rendererMask: getComputedStyle(document.querySelector('[data-sand-canvas]')).maskImage };
+  });
+  assert.equal(results.curtainArtwork.source, '/assets/images/cortina-def.webp');
+  assert.equal(results.curtainArtwork.background, '/assets/images/fondo-def.webp');
+  assert.deepEqual(results.curtainArtwork.sourceSize, [1672, 941]);
+  assert.deepEqual(results.curtainArtwork.backgroundSize, [1672, 941]);
+  assert.equal(results.curtainArtwork.imageWidth, 1672);
+  assert.equal(results.curtainArtwork.imageHeight, 941);
+  assert.equal(results.curtainArtwork.gravity, 981);
+  assert.equal(results.curtainArtwork.fallbackHidden, true, 'The curtain bitmap is only a static fallback, never drawn beneath its particles');
+  assert.equal(results.curtainArtwork.rendererMask, 'none', 'Detached grains must remain visible outside the curtain silhouette');
+  for (const key of ['x', 'y', 'width', 'height']) {
+    assert.ok(Math.abs(results.curtainArtwork.rect[key] - results.curtainArtwork.expected[key]) < .01,
+      'Curtain particles and background must share the original artwork cover transform');
+  }
+  results.curtainSourceMask = await page.evaluate(() => {
+    const state = window.__sandGpu.curtain(), image = document.querySelector('[data-curtain-image]');
+    const sample = document.createElement('canvas'); sample.width = image.naturalWidth; sample.height = image.naturalHeight;
+    // Match the initialization readback path: Chromium's accelerated Canvas 2D
+    // rounds a few translucent RGB channels differently when unpremultiplying.
+    const context = sample.getContext('2d', { willReadFrequently: true }); context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    window.__curtainFixture = { pixels, width: sample.width, height: sample.height };
+    let invalidSources = 0, mismatchedColors = 0, invalidFlows = 0;
+    const colors = new Set();
+    for (let index = 0; index < state.count; index++) {
+      const i = index * 4;
+      const x = Math.floor((state.sources[i] - state.rect.x) / state.rect.width * sample.width);
+      const y = Math.floor((state.sources[i + 1] - state.rect.y) / state.rect.height * sample.height);
+      const pixel = (y * sample.width + x) * 4;
+      if (x < 0 || y < 0 || x >= sample.width || y >= sample.height || pixels[pixel + 3] < 128) invalidSources++;
+      for (let channel = 0; channel < 4; channel++) if (state.colors[i + channel] !== pixels[pixel + channel]) mismatchedColors++;
+      if (state.flows[i + 3] !== 1 || state.flows[i] > state.sources[i + 1] || state.flows[i + 1] <= state.sources[i + 1]
+        || Math.abs(state.flows[i + 2] - state.sources[i]) > .001) invalidFlows++;
+      colors.add(`${state.colors[i]},${state.colors[i + 1]},${state.colors[i + 2]}`);
+    }
+    return { count: state.count, invalidSources, mismatchedColors, invalidFlows, distinctColors: colors.size };
+  });
+  assert.equal(results.curtainSourceMask.invalidSources, 0, 'Every emitter must come from an opaque pixel of cortina def');
+  assert.equal(results.curtainSourceMask.mismatchedColors, 0, 'Emitter RGBA must reproduce the supplied artwork, including alpha');
+  assert.equal(results.curtainSourceMask.invalidFlows, 0, 'Each opaque vertical segment must have an independent waterfall channel');
+  assert.ok(results.curtainSourceMask.distinctColors > 100, 'The curtain must retain its original shading');
+  results.sourceMask = await page.evaluate(async () => {
+    const sources = window.__sandGpu.sources();
+    const emitter = document.querySelector('[data-sand-frame]'), hero = document.querySelector('[data-sand-hero]');
+    const frame = new Image(); frame.src = emitter.dataset.sandMask; await frame.decode();
+    const r = emitter.getBoundingClientRect(), h = hero.getBoundingClientRect();
+    const sample = document.createElement('canvas'); sample.width = frame.naturalWidth; sample.height = frame.naturalHeight;
+    const context = sample.getContext('2d'); context.drawImage(frame, 0, 0);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    let invalidSources = 0, topMin = Infinity, topMax = -Infinity;
+    for (let i = 0; i < sources.length; i += 4) {
+      const x = Math.floor((sources[i] - r.left + h.left) / r.width * sample.width);
+      const y = Math.floor((sources[i + 1] - r.top + h.top) / r.height * sample.height);
+      if (pixels[(y * sample.width + x) * 4 + 3] < 128) invalidSources++;
+      if (y < 10 && x > 10 && x < sample.width - 10) { topMin = Math.min(topMin, y); topMax = Math.max(topMax, y); }
+    }
+    const row = Math.floor(sample.height / 2);
+    let nativeStroke = 0;
+    while (pixels[(row * sample.width + nativeStroke) * 4 + 3] >= 128) nativeStroke++;
+    return { invalidSources, total: sources.length / 4, source: new URL(frame.src).pathname,
+      width: sample.width, height: sample.height, nativeStroke, topMin, topMax };
+  });
+  assert.equal(results.sourceMask.invalidSources, 0);
+  assert.equal(results.sourceMask.source, '/assets/images/marco.webp');
+  assert.equal(results.sourceMask.nativeStroke, 10);
+  assert.equal(results.sourceMask.topMin, 0);
+  assert.equal(results.sourceMask.topMax, 9);
+  await page.evaluate(() => { window.__sandInitial = window.__sandGpu.snapshot().positions; });
+  await page.screenshot({ path: 'artifacts/hero-gpu-desktop.png' });
+  await page.waitForTimeout(500);
+  results.continuousFlow = await page.evaluate(() => {
+    const next = window.__sandGpu.snapshot().positions, previous = window.__sandInitial;
+    let moved = 0;
+    for (let i = 0; i < next.length; i += 4) if (Math.hypot(next[i] - previous[i], next[i + 1] - previous[i + 1]) > 1) moved++;
+    delete window.__sandInitial;
+    return { moved, count: next.length / 4 };
+  });
+  assert.ok(results.continuousFlow.moved > results.continuousFlow.count * .8);
+  results.untouchedFrame = await page.evaluate(async () => {
+    const gpu = window.__sandGpu;
+    gpu.step(110, { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false });
+    const state = gpu.snapshot(), emitter = document.querySelector('[data-sand-frame]');
+    const hero = document.querySelector('[data-sand-hero]'), r = emitter.getBoundingClientRect(), h = hero.getBoundingClientRect();
+    const image = new Image(); image.src = emitter.dataset.sandMask; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+    const alpha = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let outsideMask = 0, falling = 0, contacts = 0;
+    for (let i = 0; i < state.count; i++) {
+      const offset = i * 4;
+      const x = Math.floor((state.positions[offset] - r.left + h.left) / r.width * canvas.width);
+      const y = Math.floor((state.positions[offset + 1] - r.top + h.top) / r.height * canvas.height);
+      if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height || alpha[(y * canvas.width + x) * 4 + 3] < 128) outsideMask++;
+      falling += state.positions[offset + 3]; contacts += state.positions[offset + 2];
+    }
+    gpu.reset();
+    return { outsideMask, falling, contacts, count: state.count };
+  });
+  assert.equal(results.untouchedFrame.outsideMask, 0, 'Circulating grains must remain inside the original frame alpha after full laps');
+  assert.equal(results.untouchedFrame.falling, 0, 'No grain may fall without a cursor contact');
+  assert.equal(results.untouchedFrame.contacts, 0);
+  // The SVG logo stays visible and unchanged during a real hover.
+  const logoBefore = await page.locator('[data-logo-image]').boundingBox();
+  await page.mouse.move(logoBefore.x + logoBefore.width * .58, logoBefore.y + logoBefore.height * .48);
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+  assert.deepEqual(await page.locator('[data-logo-image]').boundingBox(), logoBefore);
+  results.staticLogo = await page.evaluate(() => ({
+    effect: document.querySelector('[data-sand-hero]').dataset.logoEffect,
+    gpuLogoAbsent: !('logo' in window.__sandGpu) && !('stepLogo' in window.__sandGpu),
+    visibility: getComputedStyle(document.querySelector('[data-logo-image]')).visibility,
+    logoLayer: Number(getComputedStyle(document.querySelector('[data-logo-image]')).zIndex),
+    curtainLayer: Number(getComputedStyle(document.querySelector('[data-curtain-image]')).zIndex),
+    frameLayer: Number(getComputedStyle(document.querySelector('[data-sand-canvas]')).zIndex),
+    logoBlend: getComputedStyle(document.querySelector('[data-logo-image]')).mixBlendMode,
+  }));
+  assert.equal(results.staticLogo.effect, 'none');
+  assert.equal(results.staticLogo.gpuLogoAbsent, true);
+  assert.equal(results.staticLogo.visibility, 'visible');
+  assert.ok(results.staticLogo.logoLayer > results.staticLogo.curtainLayer &&
+    results.staticLogo.logoLayer > results.staticLogo.frameLayer, 'The logo must be composited above the curtain effect');
+  assert.equal(results.staticLogo.logoBlend, 'normal');
+  await page.mouse.move(1300, 650);
+  await page.evaluate(() => document.querySelector('[data-sand-toggle]').click());
+  results.curtainFlow = await page.evaluate(() => {
+    const gpu = window.__sandGpu;
+    const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
+    gpu.reset();
+    const initial = gpu.curtain();
+    const sampleMask = state => {
+      const fixture = window.__curtainFixture;
+      let outsideMask = 0, detached = 0, contacts = 0, finite = true;
+      for (let index = 0; index < state.count; index++) {
+        const i = index * 4;
+        const x = Math.floor((state.positions[i] - state.rect.x) / state.rect.width * fixture.width);
+        const y = Math.floor((state.positions[i + 1] - state.rect.y) / state.rect.height * fixture.height);
+        if (x < 0 || y < 0 || x >= fixture.width || y >= fixture.height || fixture.pixels[(y * fixture.width + x) * 4 + 3] < 128) outsideMask++;
+        detached += state.positions[i + 3]; contacts += state.positions[i + 2];
+        for (let channel = 0; channel < 4; channel++) finite &&= Number.isFinite(state.positions[i + channel]) && Number.isFinite(state.velocities[i + channel]);
+      }
+      return { outsideMask, detached, contacts, finite };
+    };
+    gpu.step(.05, none);
+    const advanced = gpu.curtain();
+    let moved = 0, descending = 0, wrapped = 0;
+    for (let index = 0; index < advanced.count; index++) {
+      const i = index * 4, dy = advanced.positions[i + 1] - initial.positions[i + 1];
+      if (Math.abs(dy) > 1) moved++;
+      if (dy > 0) descending++;
+      else if (dy < 0) wrapped++;
+    }
+    const afterShortStep = sampleMask(advanced);
+    // A deliberately large shader tick crosses the bottom of every long channel.
+    // This verifies modulo recycling directly, independently of real frame rate.
+    gpu.step(20, none);
+    const afterFullLoops = sampleMask(gpu.curtain());
+    gpu.reset();
+    const restored = gpu.curtain();
+    let resetError = 0;
+    for (let i = 0; i < initial.count * 4; i++) {
+      resetError = Math.max(resetError, Math.abs(restored.positions[i] - initial.positions[i]),
+        Math.abs(restored.velocities[i] - initial.velocities[i]));
+    }
+    return { count: initial.count, moved, descending, wrapped, afterShortStep, afterFullLoops, resetError };
+  });
+  assert.ok(results.curtainFlow.moved > results.curtainFlow.count * .8, 'The waterfall must keep flowing without a cursor');
+  assert.ok(results.curtainFlow.descending > results.curtainFlow.count * .8);
+  for (const state of [results.curtainFlow.afterShortStep, results.curtainFlow.afterFullLoops]) {
+    assert.equal(state.outsideMask, 0, 'Uninterrupted waterfall channels must preserve every gap and edge in the original silhouette');
+    assert.equal(state.detached, 0); assert.equal(state.contacts, 0); assert.equal(state.finite, true);
+  }
+  assert.equal(results.curtainFlow.resetError, 0, 'Reset must restore both GPU position and velocity textures exactly');
+  const initialCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-initial.png' });
+  await page.evaluate(() => {
+    const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
+    for (let tick = 0; tick < 12; tick++) window.__sandGpu.step(1 / 120, none);
+  });
+  const animatedCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-animated.png' });
+  results.curtainAnimation = await page.evaluate(async ({ initial, animated }) => {
+    const decode = async bytes => {
+      const image = new Image(); image.src = 'data:image/png;base64,' + bytes; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+      return { width: canvas.width, height: canvas.height, rgba: context.getImageData(0, 0, canvas.width, canvas.height).data };
+    };
+    const before = await decode(initial), after = await decode(animated);
+    const state = window.__sandGpu.curtain(), mask = document.createElement('canvas');
+    mask.width = after.width; mask.height = after.height;
+    const context = mask.getContext('2d'), ratio = after.width / innerWidth;
+    context.drawImage(document.querySelector('[data-curtain-image]'), state.rect.x * ratio, state.rect.y * ratio,
+      state.rect.width * ratio, state.rect.height * ratio);
+    const alpha = context.getImageData(0, 0, mask.width, mask.height).data;
+    let inside = 0, changedInside = 0;
+    for (let i = 0; i < after.rgba.length; i += 4) if (alpha[i + 3] > 240) {
+      inside++;
+      if ([0, 1, 2].some(channel => Math.abs(before.rgba[i + channel] - after.rgba[i + channel]) > 2)) changedInside++;
+    }
+    return { inside, changedInside };
+  }, { initial: initialCurtain.toString('base64'), animated: animatedCurtain.toString('base64') });
+  assert.ok(results.curtainAnimation.inside > 100000);
+  assert.ok(results.curtainAnimation.changedInside > 10000, 'GPU particles must visibly flow throughout the curtain');
+  await page.evaluate(() => window.__sandGpu.reset());
+  const restoredCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-restored.png' });
+  assert.deepEqual(restoredCurtain, initialCurtain, 'Reset must restore the same particle artwork and static logo');
+  results.curtainPhysics = await page.evaluate(() => {
+    const gpu = window.__sandGpu;
+    gpu.reset();
+    const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
+    const initial = gpu.curtain();
+    let index = -1;
+    for (let candidate = 0; candidate < initial.count; candidate++) {
+      const i = candidate * 4, top = initial.flows[i], bottom = initial.flows[i + 1], x = initial.flows[i + 2];
+      if (x > 100 && x < innerWidth - 100 && bottom - top > 100 && (top + bottom) * .5 > 100
+        && (top + bottom) * .5 < document.querySelector('[data-sand-hero]').clientHeight - 100) { index = candidate; break; }
+    }
+    if (index < 0) throw new Error('No visible curtain channel available for the GPU physics probe');
+    const offset = index * 4, flow = Array.from(initial.flows.slice(offset, offset + 4));
+    const source = Array.from(initial.sources.slice(offset, offset + 4));
+    const x = flow[2], y = (flow[0] + flow[1]) * .5, seed = source[2], speed = 80 + seed * 90;
+    const particle = () => {
+      const state = gpu.curtain();
+      return { position: Array.from(state.positions.slice(offset, offset + 4)),
+        velocity: Array.from(state.velocities.slice(offset, offset + 4)) };
+    };
+    gpu.setCurtainParticle(index, [x, y, 0, 0], [0, 120, seed, -1]);
+    gpu.step(.01, none);
+    const channelGravity = particle();
+    gpu.setCurtainParticle(index, [x, flow[1] - .2, 0, 0], [0, 1000, seed, -1]);
+    gpu.step(.01, none);
+    const wrap = particle();
+    gpu.setCurtainParticle(index, [x, y, 0, 0], [0, 120, seed, -1]);
+    gpu.step(.01, { ...none, x: x + 12, y, previousX: x + 12, previousY: y, active: true });
+    const nearMiss = particle();
+    gpu.setCurtainParticle(index, [x, y, 0, 0], [0, 120, seed, -1]);
+    gpu.step(.01, { ...none, x: x + 8, y, previousX: x + 8, previousY: y, active: true });
+    const detached = particle();
+    gpu.step(.01, none);
+    const detachedFall = particle();
+    gpu.setCurtainParticle(index, [400, 200, 0, 1], [0, 0, seed, 0]);
+    gpu.step(.01, none);
+    const gravity = particle();
+    gpu.setCurtainParticle(index, [400, 255, 0, 1], [0, 500, seed, 0]);
+    gpu.step(1 / 120, { ...none, x: 400, y: 260, previousX: 400, previousY: 260, active: true });
+    const bounce = particle();
+    gpu.setCurtainParticle(index, [400, 400, 0, 1], [0, 0, seed, 0]);
+    gpu.step(1 / 120, { ...none, x: 600, y: 400, previousX: 200, previousY: 400, active: true });
+    const sweep = particle();
+    const heroHeight = document.querySelector('[data-sand-hero]').clientHeight;
+    gpu.setCurtainParticle(index, [400, heroHeight + 21, 0, 1], [0, 100, seed, 0]);
+    gpu.step(.01, none);
+    const recycled = particle();
+    gpu.setCurtainParticle(index, [400, 200, 0, 1], [0, 0, seed, 3.195]);
+    gpu.step(.01, none);
+    const ageRecycled = particle();
+    const fixture = window.__curtainFixture;
+    let outsidePoint;
+    for (let py = 90.5; py < heroHeight - 80 && !outsidePoint; py += 29) {
+      for (let px = 90.5; px < innerWidth - 80; px += 29) {
+        const nativeX = Math.floor((px - initial.rect.x) / initial.rect.width * fixture.width);
+        const nativeY = Math.floor((py - initial.rect.y) / initial.rect.height * fixture.height);
+        if (nativeX >= 0 && nativeY >= 0 && nativeX < fixture.width && nativeY < fixture.height &&
+          fixture.pixels[(nativeY * fixture.width + nativeX) * 4 + 3] === 0) { outsidePoint = [px, py]; break; }
+      }
+    }
+    if (!outsidePoint) throw new Error('The supplied curtain must have transparent space for the detached rendering probe');
+    gpu.setCurtainParticle(index, [...outsidePoint, 0, 1], [0, 0, seed, .1]);
+    gpu.step(1 / 120, none);
+    const detachedOutsideMask = particle(), glow = gpu.glow(detachedOutsideMask.position[0], detachedOutsideMask.position[1]);
+    const rendererMask = getComputedStyle(document.querySelector('[data-sand-canvas]')).maskImage;
+    const glError = document.querySelector('[data-sand-canvas]').getContext('webgl2').getError();
+    gpu.reset();
+    return { index, flow, source, speed, x, y, channelGravity, wrap, nearMiss, detached, detachedFall,
+      gravity, bounce, sweep, recycled, ageRecycled, outsidePoint, detachedOutsideMask, glow, rendererMask, glError };
+  });
+  const curtainPhysics = results.curtainPhysics;
+  const channelVelocity = 120 * Math.exp(-2.6 * .01) + 9.81;
+  assert.ok(Math.abs(curtainPhysics.channelGravity.velocity[1] - channelVelocity) < .01);
+  assert.ok(Math.abs(curtainPhysics.channelGravity.position[1] - (curtainPhysics.y + channelVelocity * .01)) < .01);
+  assert.equal(curtainPhysics.channelGravity.position[3], 0);
+  assert.equal(curtainPhysics.channelGravity.velocity[3], -1);
+  const channelLength = curtainPhysics.flow[1] - curtainPhysics.flow[0];
+  const wrapVelocity = 1000 * Math.exp(-2.6 * .01) + 9.81;
+  const expectedWrappedY = curtainPhysics.flow[0] + (channelLength - .2 + wrapVelocity * .01) % channelLength;
+  assert.ok(Math.abs(curtainPhysics.wrap.position[1] - expectedWrappedY) < .01);
+  assert.ok(Math.abs(curtainPhysics.wrap.velocity[1] - curtainPhysics.speed) < .01);
+  assert.equal(curtainPhysics.wrap.position[3], 0);
+  assert.equal(curtainPhysics.nearMiss.position[3], 0, 'A cursor 12 px away must not detach curtain particles');
+  assert.equal(curtainPhysics.nearMiss.position[2], 0);
+  assert.equal(curtainPhysics.detached.position[3], 1, 'Curtain grains 8 px from the cursor must detach with the same frame physics');
+  assert.ok(curtainPhysics.detached.position[2] > 0);
+  assert.ok(Math.abs(curtainPhysics.detachedFall.velocity[1] -
+    (curtainPhysics.detached.velocity[1] * Math.exp(-.45 * .01) + 9.81)) < .04);
+  assert.ok(Math.abs(curtainPhysics.gravity.velocity[1] - 9.81) < .01);
+  assert.ok(Math.abs(curtainPhysics.gravity.position[1] - 200.0981) < .01);
+  assert.ok(curtainPhysics.bounce.position[2] > 0 && curtainPhysics.bounce.velocity[1] < 0);
+  assert.ok(Math.hypot(curtainPhysics.bounce.position[0] - 400, curtainPhysics.bounce.position[1] - 260) > 10);
+  assert.ok(curtainPhysics.sweep.position[2] > 0 && curtainPhysics.sweep.position[0] > 600,
+    'A fast-moving cursor must collide continuously rather than tunnel through curtain particles');
+  for (const recycled of [curtainPhysics.recycled, curtainPhysics.ageRecycled]) {
+    assert.equal(recycled.position[3], 0); assert.equal(recycled.velocity[3], -1);
+    assert.ok(Math.hypot(recycled.position[0] - curtainPhysics.source[0], recycled.position[1] - curtainPhysics.source[1]) < .001);
+    assert.ok(Math.abs(recycled.velocity[1] - curtainPhysics.speed) < .01);
+  }
+  assert.equal(curtainPhysics.rendererMask, 'none');
+  assert.ok(curtainPhysics.glow.particles[3] > 0, 'Detached curtain grains must still render outside their original silhouette');
+  assert.equal(curtainPhysics.glError, 0);
+  await page.locator('[data-sand-toggle]').click();
+  const rect = await page.locator('[data-sand-frame]').boundingBox();
+  await page.mouse.move(rect.x + 1, rect.y + rect.height * .45);
+  await page.waitForTimeout(500);
+  const contactStart = await stateSummary();
+  await page.waitForTimeout(700);
+  results.stationaryCursor = await stateSummary();
+  assert.ok(results.stationaryCursor.contacts > contactStart.contacts, 'The live GPU stream must keep hitting a stationary cursor');
+  assert.equal(results.stationaryCursor.finite, true);
+  assert.ok(results.stationaryCursor.activeSparks > 0, 'Actual GPU contacts must launch the secondary particles');
+  await page.screenshot({ path: 'artifacts/hero-gpu-collision.png' });
+  await page.mouse.move(rect.x + 70, rect.y + rect.height * .5, { steps: 10 });
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: 'artifacts/hero-gpu-fan.png' });
+
+  // Pause the real animation and test the actual GPU shader, not a CPU replica.
+  await page.locator('[data-sand-toggle]').click();
+  const pausedTime = (await metrics()).sandTime;
+  const pausedCurtain = await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions));
+  await page.waitForTimeout(150);
+  assert.equal((await metrics()).sandTime, pausedTime);
+  assert.deepEqual(await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), pausedCurtain,
+    'Pause must freeze the actual waterfall GPU texture');
+  results.shaderPhysics = await page.evaluate(() => {
+    const gpu = window.__sandGpu;
+    gpu.reset();
+    const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
+    const particle = () => {
+      const state = gpu.snapshot();
+      return { position: Array.from(state.positions.slice(0, 4)), velocity: Array.from(state.velocities.slice(0, 4)),
+        impact: Array.from(state.impacts.slice(0, 4)), sparkPosition: Array.from(state.sparks.positions.slice(0, 4)),
+        sparkVelocity: Array.from(state.sparks.velocities.slice(0, 4)) };
+    };
+    const route = Array.from(gpu.routes().slice(0, 4)), sourceSeed = gpu.sources()[2];
+    const [left, top, width, height] = route, speed = 48 + sourceSeed * 32;
+    gpu.setParticle(0, [left + width - .2, top, 0, 0], [speed, 0, width - .2, -1]);
+    gpu.step(.01, none);
+    const corner = particle();
+    gpu.setParticle(0, [left, top + .2, 0, 0], [0, -speed, 2 * (width + height) - .2, -1]);
+    gpu.step(.01, none);
+    const wrap = particle();
+    const startX = left + width * .3, phase = width * .3;
+    gpu.setParticle(0, [startX, top, 0, 0], [speed, 0, phase, -1]);
+    gpu.step(.01, { ...none, x: startX, y: top + 12, previousX: startX, previousY: top + 12, active: true });
+    const nearMiss = particle();
+    gpu.setParticle(0, [startX, top, 0, 0], [speed, 0, phase, -1]);
+    gpu.step(.01, { ...none, x: startX, y: top + 8, previousX: startX, previousY: top + 8, active: true });
+    const detached = particle();
+    gpu.step(.01, none);
+    const detachedFall = particle();
+    gpu.setParticle(0, [400, 200, 0, 0], [0, 0, .3, 0]);
+    gpu.step(.01, none);
+    const gravity = particle();
+    gpu.setParticle(0, [400, 255, 0, 1], [0, 500, .3, 0]);
+    gpu.step(1 / 120, { ...none, x: 400, y: 260, previousX: 400, previousY: 260, active: true });
+    const bounce = particle();
+    gpu.step(.01, none);
+    const sparkFall = particle();
+    gpu.setParticle(0, [400, 400, 0, 0], [0, 0, .3, 0]);
+    gpu.step(1 / 120, { ...none, x: 600, y: 400, previousX: 200, previousY: 400, active: true });
+    const sweep = particle();
+    gpu.setParticle(0, [400, 921, 0, 0], [0, 100, .3, 0]);
+    gpu.step(1 / 120, none);
+    const recycled = particle(), source = Array.from(gpu.sources().slice(0, 4));
+    gpu.setParticle(0, [420, 200, 0, 0], [0, 0, .3, 0]);
+    gpu.setParticle(1, [420, 200, 0, 0], [0, 0, .3, 0]);
+    gpu.step(.01, none);
+    const independent = gpu.snapshot().positions;
+    const independentDistance = Math.hypot(independent[0] - independent[4], independent[1] - independent[5]);
+    gpu.step(1.8, none);
+    const expiredSpark = particle().sparkPosition;
+    gpu.reset();
+    return { route, corner, wrap, nearMiss, detached, detachedFall, gravity, bounce, sparkFall,
+      sweep, recycled, source, independentDistance, expiredSpark };
+  });
+  const physics = results.shaderPhysics;
+  assert.ok(Math.abs(physics.corner.position[0] - (physics.route[0] + physics.route[2])) < .003);
+  assert.ok(physics.corner.position[1] > physics.route[1] && physics.corner.position[1] < physics.route[1] + 1);
+  assert.equal(physics.corner.position[3], 0);
+  assert.equal(physics.corner.velocity[3], -1);
+  assert.ok(Math.abs(physics.wrap.position[1] - physics.route[1]) < .003 && physics.wrap.velocity[0] > 0);
+  assert.equal(physics.wrap.position[3], 0);
+  assert.equal(physics.nearMiss.position[3], 0, 'A cursor 12 px away must not detach particles');
+  assert.equal(physics.nearMiss.position[2], 0);
+  assert.equal(physics.detached.position[3], 1, 'A grain 8 px from the cursor must detach within its 10 px radius');
+  assert.ok(physics.detached.position[2] > 0);
+  assert.ok(Math.abs(physics.detachedFall.velocity[1] -
+    (physics.detached.velocity[1] * Math.exp(-.04 * .01) + 9.81)) < .04);
+  assert.ok(Math.abs(physics.gravity.velocity[1] - 9.81) < .01);
+  assert.ok(Math.abs(physics.gravity.position[1] - 200.0981) < .01);
+  assert.ok(physics.bounce.position[2] > 0 && physics.bounce.velocity[1] < 0);
+  assert.ok(Math.hypot(physics.bounce.position[0] - 400, physics.bounce.position[1] - 260) > 10);
+  assert.ok(physics.bounce.impact[2] >= 0 && physics.bounce.sparkPosition[3] >= 0);
+  assert.ok(Math.abs(physics.sparkFall.sparkVelocity[1] -
+    (physics.bounce.sparkVelocity[1] * Math.exp(-1.65 * .01) + 9.81)) < .04, 'Secondary particles must obey gravity and air resistance');
+  assert.ok(Math.hypot(physics.bounce.sparkPosition[0] - 400, physics.bounce.sparkPosition[1] - 260) > 10);
+  assert.equal(physics.expiredSpark[0], -10000, 'Secondary particles must expire');
+  assert.ok(physics.sweep.position[2] > 0 && physics.sweep.position[0] > 600);
+  assert.equal(physics.recycled.position[3], 0);
+  assert.equal(physics.recycled.velocity[3], -1);
+  assert.ok(Math.hypot(physics.recycled.position[0] - physics.source[0], physics.recycled.position[1] - physics.source[1]) < 3);
+  assert.ok(physics.independentDistance < .001, 'Particles in the supplied reference do not collide with each other');
+  results.visualStyle = await page.evaluate(() => {
+    const gpu = window.__sandGpu;
+    const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
+    const source = gpu.sources();
+    const age = Math.sqrt(2 * Math.max(1, 920 - source[1]) / 981) * .28;
+    gpu.setParticle(0, [1320.5, 710.5, 0, 0], [0, 0, .3, age]);
+    gpu.step(1 / 120, none);
+    const core = gpu.glow(1320.5, 710.5), halo = gpu.glow(1326.5, 710.5);
+    const error = document.querySelector('[data-sand-canvas]').getContext('webgl2').getError();
+    gpu.reset();
+    return { core, halo, glError: error };
+  });
+  assert.equal(results.visualStyle.glError, 0);
+  assert.ok(results.visualStyle.core.particles[3] > 0);
+  assert.ok(results.visualStyle.halo.particles[3] < results.visualStyle.core.particles[3]);
+  assert.ok(results.visualStyle.halo.bloom[3] > .000001, 'The blur must produce a real halo outside the particle sprite');
+  await page.locator('[data-sand-toggle]').click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+
+  results.viewports = [];
+  for (const width of [320, 375, 768, 1024, 1920]) {
+    await page.setViewportSize({ width, height: width < 600 ? 812 : 900 });
+    await page.waitForTimeout(350);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal((await metrics()).sandReady, 'true');
+    assert.equal(Number((await metrics()).sandParticles), width < 600 ? 8192 : 32768);
+    assert.equal((await metrics()).curtainReady, 'true');
+    assert.equal((await metrics()).curtainEffect, 'particle-waterfall');
+    assert.equal(Number((await metrics()).curtainParticles), width < 600 ? 32768 : 131072);
+    assert.equal(Number((await metrics()).curtainGravity), 981);
+    const alignment = await page.evaluate(() => {
+      const hero = document.querySelector('[data-sand-hero]'), state = window.__sandGpu.curtain();
+      const scale = Math.max(hero.clientWidth / 1672, hero.clientHeight / 941);
+      const expected = { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2,
+        width: 1672 * scale, height: 941 * scale };
+      return Math.max(...Object.keys(expected).map(key => Math.abs(state.rect[key] - expected[key])));
+    });
+    assert.ok(alignment < .01, 'Resize must keep the particle curtain aligned with its background');
+    assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+    results.viewports.push({ width, ...await metrics(), ...await stateSummary() });
+    if (width === 375) await page.screenshot({ path: 'artifacts/hero-gpu-mobile.png' });
+  }
+  const touchPage = await browser.newPage({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
+  touchPage.setDefaultTimeout(12000);
+  await touchPage.goto(baseURL.href); await touchPage.waitForSelector('[data-sand-ready="true"]');
+  await touchPage.waitForTimeout(300);
+  const touchRect = await touchPage.locator('[data-sand-frame]').boundingBox();
+  await touchPage.touchscreen.tap(touchRect.x + 2, touchRect.y + touchRect.height * .4);
+  results.touchTap = await touchPage.evaluate(() => {
+    const positions = window.__sandGpu.snapshot().positions;
+    let contacts = 0;
+    for (let i = 2; i < positions.length; i += 4) contacts += positions[i];
+    return contacts;
+  });
+  assert.ok(results.touchTap > 0);
+  assert.equal(await touchPage.locator('[data-logo-image]').isVisible(), true);
+  assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-ready'), 'true');
+  assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-effect'), 'particle-waterfall');
+  assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-logo-effect'), 'none');
+  const curtainTap = await touchPage.evaluate(() => {
+    const state = window.__sandGpu.curtain(), hero = document.querySelector('[data-sand-hero]');
+    for (let index = 0; index < state.count; index++) {
+      const i = index * 4, x = state.positions[i], y = state.positions[i + 1];
+      if (x > 35 && x < innerWidth - 35 && y > 70 && y < hero.clientHeight - 70) return { x, y };
+    }
+    throw new Error('No visible curtain particles available for touch verification');
+  });
+  await touchPage.touchscreen.tap(curtainTap.x, curtainTap.y);
+  results.curtainTouchTap = await touchPage.evaluate(() => {
+    const state = window.__sandGpu.curtain();
+    let contacts = 0;
+    for (let i = 2; i < state.count * 4; i += 4) contacts += state.positions[i];
+    return contacts;
+  });
+  assert.ok(results.curtainTouchTap > 0, 'A touch must disturb the real waterfall particles');
+  await touchPage.close();
+  await page.emulateMedia({ reducedMotion: 'reduce' }); await page.reload();
+  await page.waitForFunction(() => document.querySelector('[data-sand-status]').textContent.includes('movimiento reducido'));
+  assert.equal(await page.locator('[data-sand-toggle]').isDisabled(), true);
+  assert.equal(await page.locator('[data-sand-frame]').isVisible(), false);
+  assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').evaluate(image => Number(getComputedStyle(image).opacity)), 1);
+  assert.equal(await page.locator('[data-curtain-image]').getAttribute('src'), '/assets/images/cortina-def.webp');
+  results.reducedMotion = true;
+  await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.reload();
+  await page.waitForSelector('[data-sand-ready="true"]');
+  await page.locator('[data-sand-canvas]').evaluate(canvas => canvas.getContext('webgl2').getExtension('WEBGL_lose_context').loseContext());
+  await page.waitForSelector('[data-sand-ready="false"]');
+  assert.equal(await page.locator('[data-sand-frame]').isVisible(), false);
+  results.contextLossFallback = true;
+  assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').evaluate(image => Number(getComputedStyle(image).opacity)), 1);
+  await page.addInitScript(() => {
+    const original = WebGL2RenderingContext.prototype.getExtension;
+    WebGL2RenderingContext.prototype.getExtension = function(name) {
+      return name === 'EXT_color_buffer_float' ? null : original.call(this, name);
+    };
+  });
+  await page.reload();
+  await page.waitForSelector('[data-sand-ready="false"]');
+  assert.equal(await page.locator('[data-sand-toggle]').isDisabled(), true);
+  results.unsupportedGpuFallback = true;
+  assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').isVisible(), true);
+  assert.equal(await page.locator('[data-curtain-image]').evaluate(image => Number(getComputedStyle(image).opacity)), 1);
+  assert.deepEqual(errors, []); assert.deepEqual(failedRequests, []);
+  results.consoleErrors = errors; results.failedRequests = failedRequests;
+  await writeFile('artifacts/gpu-verification.json', JSON.stringify(results, null, 2));
+  console.log(JSON.stringify(results, null, 2));
+} catch (error) {
+  console.log(JSON.stringify({ errors, failedRequests, shaderPhysics: results.shaderPhysics,
+    curtainArtwork: results.curtainArtwork, curtainSourceMask: results.curtainSourceMask,
+    curtainFlow: results.curtainFlow, curtainPhysics: results.curtainPhysics,
+    curtainAnimation: results.curtainAnimation, metrics: await metrics(), status: await page.locator('[data-sand-status]').textContent() }, null, 2));
+  await page.screenshot({ path: 'artifacts/browser-failure.png' }); throw error;
+} finally { await browser.close(); }

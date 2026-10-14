@@ -5,6 +5,7 @@ import { extname, resolve, sep } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
 const label = process.env.BENCHMARK_LABEL || 'current';
+const playCurtain = process.env.BENCHMARK_PLAY === '1';
 let baseURL = process.env.PREVIEW_URL || 'http://127.0.0.1:4321/';
 let staticServer;
 if (process.env.BENCHMARK_STATIC_DIR) {
@@ -42,7 +43,7 @@ try {
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       await page.addInitScript(() => {
-        window.__particlePerf = { longTasks: [], lcp: null, readyAt: null };
+        window.__particlePerf = { longTasks: [], lcp: null, readyAt: null, playAt: null, curtainReadyAt: null };
         const observe = (type, fn) => {
           try { new PerformanceObserver(list => list.getEntries().forEach(fn)).observe({ type, buffered: true }); } catch {}
         };
@@ -50,13 +51,20 @@ try {
         observe('largest-contentful-paint', e => { window.__particlePerf.lcp = { start: e.startTime, size: e.size, url: e.url }; });
         const check = () => {
           const hero = document.querySelector('[data-sand-hero]');
-          if (hero?.dataset.sandReady === 'true' && hero?.dataset.curtainReady === 'true' && window.__particlePerf.readyAt === null)
+          if (hero?.dataset.sandReady === 'true' && window.__particlePerf.readyAt === null)
             window.__particlePerf.readyAt = performance.now();
+          if (hero?.dataset.curtainReady === 'true' && window.__particlePerf.curtainReadyAt === null)
+            window.__particlePerf.curtainReadyAt = performance.now();
         };
         new MutationObserver(check).observe(document, { subtree: true, attributes: true, childList: true });
       });
       const response = await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
-      await page.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]', { timeout: 30000 });
+      await page.waitForSelector('[data-sand-ready="true"]', { timeout: 30000 });
+      if (playCurtain) {
+        await page.evaluate(() => { window.__particlePerf.playAt = performance.now(); });
+        await page.locator('[data-curtain-play]').click();
+        await page.waitForSelector('[data-curtain-ready="true"]', { timeout: 30000 });
+      }
       await page.waitForTimeout(500);
       const sample = await page.evaluate(() => {
         const state = window.__particlePerf, hero = document.querySelector('[data-sand-hero]');
@@ -73,7 +81,9 @@ try {
           if (pixels[(y * canvas.width + x) * 4 + 3] < 128) continue;
           minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
         }
-        return { readinessMs: state.readyAt, paints, lcp: state.lcp, longTasks: state.longTasks,
+        return { readinessMs: state.readyAt,
+          curtainPlayMs: state.playAt === null ? null : state.curtainReadyAt - state.playAt,
+          paints, lcp: state.lcp, longTasks: state.longTasks,
           mainThreadLongTaskMs: state.longTasks.reduce((sum, task) => sum + task.duration, 0),
           counts: { frame: Number(hero.dataset.sandParticles), sparks: Number(hero.dataset.sandSparks), curtain: Number(hero.dataset.curtainParticles) },
           jsBytes: js.reduce((sum, r) => sum + r.transferSize, 0), jsDecodedBytes: js.reduce((sum, r) => sum + r.decodedBodySize, 0), jsRequests: js.length,

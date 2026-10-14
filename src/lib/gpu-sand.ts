@@ -3,7 +3,7 @@ import { buildParticleSeeds, buildSparkSeeds, type FrameRect, type ParticleSeeds
 import { PARTICLE_FRAGMENT, PARTICLE_VERTEX, QUAD_VERTEX, SIMULATION_FRAGMENT,
   SPARK_SIMULATION_FRAGMENT, SPARK_VERTEX } from './sand-shaders';
 import { ParticleGlow } from './particle-glow';
-import { GpuCurtain } from './gpu-curtain';
+import type { GpuCurtain } from './gpu-curtain';
 import { getParticleQuality, type ParticleQuality } from './particle-quality';
 import type { CurtainSeeds } from './curtain-seeds';
 
@@ -183,9 +183,11 @@ export class GpuSand {
 
   get curtainCount() { return this.curtain?.count ?? 0; }
 
-  attachCurtain(image: HTMLImageElement, rect: FrameRect, prepared?: CurtainSeeds) {
+  async attachCurtain(image: HTMLImageElement, rect: FrameRect, prepared?: CurtainSeeds) {
+    const { GpuCurtain: CurtainEngine } = await import('./gpu-curtain');
+    if (this.disposed || this.gl.isContextLost()) throw new Error('Particle engine is no longer available');
     this.curtain?.dispose(); this.curtain = undefined;
-    this.curtain = new GpuCurtain(this.renderer, image, rect, this.width, this.height, this.quality, prepared);
+    this.curtain = new CurtainEngine(this.renderer, image, rect, this.width, this.height, this.quality, prepared);
   }
 
   reset() {

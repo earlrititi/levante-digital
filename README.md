@@ -15,11 +15,19 @@ La verificación guarda capturas y lecturas GPU en `artifacts/`, que no se publi
 El hero combina `fondo-def.webp`, noise, las partículas de la cortina y del marco,
 y `logo-hero-vector.svg`. El logo permanece estático por encima de toda la animación.
 En escritorio su tamaño y el comienzo de «levante» se anclan al lienzo del fondo:
-el símbolo queda a la izquierda de la cascada. En móvil se centra y reduce para
+las letras quedan dentro de la cascada también a pantalla completa y el símbolo
+se mantiene a su izquierda. En móvil se centra y reduce para
 mantener la marca completa dentro de la pantalla.
 Fondo y cortina comparten el lienzo original de 1672 × 941: ambos reciben el mismo
 escalado `cover`, centrado horizontal y verticalmente, para preservar su composición
-en escritorio y móvil. La imagen plana de la cortina solo se muestra como fallback.
+en escritorio y móvil. La imagen plana de la cortina se muestra antes de play
+y como fallback si la animación no está disponible.
+
+El marco se anima al cargar. La cascada se inicia exclusivamente al pulsar
+«Reproducir cascada» en el hero, con ratón, teclado o táctil. Hasta entonces no
+se decodifica su máscara para la simulación, se preparan sus semillas ni se
+crean sus buffers o shaders GPU. Play añade la cascada al motor existente sin
+reiniciar el marco. Pausa y reinicio no activan una cascada que aún está estática.
 
 La cortina se reconstruye con 65.536 partículas en escritorio y 16.384 en móvil.
 Solo se preparan columnas y tramos visibles después del recorte `cover`, para
@@ -62,7 +70,8 @@ los envía a la GPU con buffers transferibles y conserva los píxeles decodifica
 para los siguientes tamaños. Si faltan Worker u OffscreenCanvas, se usa el mismo
 muestreo en el hilo principal. El motor WebGL se carga después de la primera
 pintura; la imagen estática y el logo permiten ver el hero mientras se prepara.
-no recorre partículas ni lee datos GPU en cada fotograma. `gpu-sand.ts` coordina
+El módulo de la cascada se carga después de play. La CPU no recorre partículas
+ni lee datos GPU en cada fotograma. `gpu-sand.ts` coordina
 el marco, la cortina y el glow; `gpu-curtain.ts` implementa la cascada;
 `curtain-seeds.ts` construye sus emisores y tramos a partir del alfa original.
 El bloom procesa la capa de partículas en HDR RGBA16F, con umbral 0,01,
@@ -77,6 +86,7 @@ Los tests de navegador verifican fuentes y colores, alineación del fondo,
 flujo descendente, vueltas dentro de la máscara, gravedad, contacto y rebote,
 colisiones continuas, partículas visibles fuera de la silueta, reciclado,
 pausa y reinicio exacto. También comprueban el marco, el logo estático superior,
+la contención de sus letras dentro de la cortina y la activación manual de play,
 los tamaños de pantalla, táctil y los fallbacks. Los datos de diagnóstico se
 exponen únicamente con `?sand-debug=1`; resultados en `artifacts/gpu-verification.json`.
 

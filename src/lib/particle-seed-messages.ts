@@ -13,9 +13,19 @@ export type ParticleSeedRequest = {
   curtain?: ImageBitmap;
 } | {
   id: number;
+  kind: 'curtain-image';
+  curtain: ImageBitmap;
+} | {
+  id: number;
   kind: 'prepare';
   frameRect: FrameRect;
   curtainRect?: FrameRect;
+  quality: ParticleSeedCounts;
+  viewport: ParticleViewport;
+} | {
+  id: number;
+  kind: 'curtain-prepare';
+  rect: FrameRect;
   quality: ParticleSeedCounts;
   viewport: ParticleViewport;
 };
@@ -27,6 +37,10 @@ export type ParticleSeedResponse = {
   id: number;
   kind: 'seeds';
   seeds: PreparedParticleSeeds;
+} | {
+  id: number;
+  kind: 'curtain-seeds';
+  seeds: CurtainSeeds;
 } | {
   id: number;
   kind: 'error';

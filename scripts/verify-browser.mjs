@@ -16,14 +16,85 @@ page.on('console', message => {
 });
 page.on('requestfailed', request => failedRequests.push(request.url()));
 const metrics = () => page.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
-function assertParticleBudget(metadata, width) {
+function assertParticleBudget(metadata, width, curtainStarted = true) {
   const mobile = width < 600, economy = metadata.sandQuality === 'economy';
   assert.ok(['desktop', 'mobile', 'economy'].includes(metadata.sandQuality));
   if (!economy) assert.equal(metadata.sandQuality, mobile ? 'mobile' : 'desktop');
   const divisor = economy ? 2 : 1, frame = (mobile ? 4096 : 16384) / divisor;
   assert.equal(Number(metadata.sandParticles), frame, 'The frame must use the bounded shared device budget');
   assert.equal(Number(metadata.sandSparks), frame / 2);
-  assert.equal(Number(metadata.curtainParticles), (mobile ? 16384 : 65536) / divisor);
+  assert.equal(Number(metadata.curtainParticles), curtainStarted ? (mobile ? 16384 : 65536) / divisor : 0);
+}
+function observeCurtainWorkers() {
+  const NativeWorker = window.Worker;
+  window.__curtainWorkerJobs = 0;
+  window.__curtainImageJobs = 0;
+  window.Worker = class extends NativeWorker {
+    postMessage(...args) {
+      if (args[0]?.kind === 'curtain-prepare') window.__curtainWorkerJobs++;
+      if (args[0]?.kind === 'curtain-image') window.__curtainImageJobs++;
+      return super.postMessage(...args);
+    }
+  };
+}
+async function assertIdleCurtain(target) {
+  const idle = await target.evaluate(() => {
+    const hero = document.querySelector('[data-sand-hero]'), image = document.querySelector('[data-curtain-image]');
+    const style = getComputedStyle(image), button = document.querySelector('[data-curtain-play]');
+    return { ...hero.dataset, gpuCurtainAbsent: window.__sandGpu.curtain() === undefined,
+      fallbackVisible: style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0,
+      playVisible: button.checkVisibility(), playEnabled: !button.disabled,
+      workerJobs: window.__curtainWorkerJobs ?? 0, imageJobs: window.__curtainImageJobs ?? 0 };
+  });
+  assert.equal(idle.curtainReady, 'false');
+  assert.equal(idle.curtainState, 'idle');
+  assert.equal(Number(idle.curtainParticles), 0);
+  assert.equal(Number(idle.curtainPreparations), 0, 'No curtain seed preparation may run before Play');
+  assert.equal(idle.gpuCurtainAbsent, true, 'No waterfall GPU buffers may exist before Play');
+  assert.equal(idle.fallbackVisible, true);
+  assert.equal(idle.playVisible, true);
+  assert.equal(idle.playEnabled, true);
+  assert.equal(idle.workerJobs, 0);
+  assert.equal(idle.imageJobs, 0, 'The curtain bitmap must not be transferred to the worker before Play');
+  return idle;
+}
+async function playCurtain(target, input = 'click') {
+  const button = target.locator('[data-curtain-play]');
+  if (input === 'keyboard') { await button.focus(); await target.keyboard.press('Enter'); }
+  else if (input === 'touch') await button.tap();
+  else await button.click();
+  await target.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  assert.equal(await button.isVisible(), false, 'Play must give way to the running waterfall');
+}
+async function logoLetterContainment(target) {
+  return target.evaluate(async () => {
+    const logo = document.querySelector('[data-logo-image]'), curtain = document.querySelector('[data-curtain-image]');
+    const hero = document.querySelector('[data-sand-hero]');
+    await Promise.all([logo.decode(), curtain.decode()]);
+    const logoCanvas = document.createElement('canvas'); logoCanvas.width = 1200; logoCanvas.height = 443;
+    const logoContext = logoCanvas.getContext('2d', { willReadFrequently: true }); logoContext.drawImage(logo, 0, 0, 1200, 443);
+    const ink = logoContext.getImageData(0, 0, 1200, 443).data;
+    const maskCanvas = document.createElement('canvas'); maskCanvas.width = curtain.naturalWidth; maskCanvas.height = curtain.naturalHeight;
+    const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true }); maskContext.drawImage(curtain, 0, 0);
+    const mask = maskContext.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
+    const h = hero.getBoundingClientRect(), l = logo.getBoundingClientRect();
+    const scale = Math.max(h.width / maskCanvas.width, h.height / maskCanvas.height);
+    const originX = (h.width - maskCanvas.width * scale) / 2, originY = (h.height - maskCanvas.height * scale) / 2;
+    let inside = 0, total = 0, outsideViewport = 0;
+    // The symbol ends before native x=548. Test painted letter pixels rather than SVG whitespace or the symbol.
+    for (let y = 0; y < 443; y++) for (let x = 548; x < 1200; x++) {
+      if (ink[(y * 1200 + x) * 4 + 3] < 128) continue;
+      total++;
+      const px = l.left - h.left + (x + .5) / 1200 * l.width;
+      const py = l.top - h.top + (y + .5) / 443 * l.height;
+      const mx = Math.floor((px - originX) / scale), my = Math.floor((py - originY) / scale);
+      if (px < 0 || py < 0 || px >= h.width || py >= h.height) outsideViewport++;
+      if (mx >= 0 && my >= 0 && mx < maskCanvas.width && my < maskCanvas.height
+        && mask[(my * maskCanvas.width + mx) * 4 + 3] >= 128) inside++;
+    }
+    return { viewport: { width: h.width, height: h.height }, logo: { x: l.left - h.left, y: l.top - h.top, width: l.width, height: l.height },
+      paintedLetterPixels: total, inside, outsideViewport, containment: inside / total };
+  });
 }
 function curtainViewportCoverage() {
   const state = window.__sandGpu.curtain(), hero = document.querySelector('[data-sand-hero]');
@@ -51,12 +122,13 @@ const stateSummary = () => page.evaluate(() => {
   return { count: state.count, contacts, falling, activeSparks, finite };
 });
 try {
+  await page.addInitScript(observeCurtainWorkers);
   assert.equal((await page.goto(baseURL.href)).status(), 200);
   await page.waitForSelector('[data-sand-ready="true"]');
   await page.waitForTimeout(300);
   results.initial = await metrics();
   assert.equal(results.initial.sandEngine, 'gpu');
-  assertParticleBudget(results.initial, 1440);
+  assertParticleBudget(results.initial, 1440, false);
   assert.ok(['worker', 'main-thread'].includes(results.initial.sandSeedPreparation));
   assert.ok(Number(results.initial.sandInitMs) > 0);
   assert.equal(results.initial.sandStyle, 'luminous');
@@ -65,7 +137,34 @@ try {
   assert.equal(results.initial.logoRendering, 'vector');
   assert.equal(results.initial.logoEffect, 'none');
   assert.equal(results.initial.logoParticles, undefined);
-  assert.equal(results.initial.curtainReady, 'true');
+  results.idleCurtain = await assertIdleCurtain(page);
+  results.initialLogoContainment = await logoLetterContainment(page);
+  assert.ok(results.initialLogoContainment.containment >= .99, 'At least 99% of the painted lettering must lie inside the curtain');
+  assert.equal(results.initialLogoContainment.outsideViewport, 0);
+  await page.screenshot({ path: 'artifacts/curtain-play-idle-desktop.png' });
+  const idleLogo = await page.locator('[data-logo-image]').boundingBox();
+  await page.mouse.move(idleLogo.x + idleLogo.width * .6, idleLogo.y + idleLogo.height * .5);
+  await page.waitForTimeout(100);
+  await page.locator('[data-sand-reset]').click();
+  await page.locator('[data-sand-toggle]').click();
+  await assertIdleCurtain(page);
+  await page.locator('[data-sand-toggle]').click();
+  await page.waitForTimeout(100);
+  await assertIdleCurtain(page);
+  const frameTimeBeforePlay = Number((await metrics()).sandTime);
+  await playCurtain(page, 'keyboard');
+  results.keyboardPlay = await metrics();
+  assert.equal(Number(results.keyboardPlay.curtainPreparations), 1, 'One activation must prepare one waterfall');
+  assert.ok(Number(results.keyboardPlay.sandTime) >= frameTimeBeforePlay, 'Starting the curtain must preserve the running frame clock');
+  assertParticleBudget(results.keyboardPlay, 1440);
+  assert.equal(results.keyboardPlay.curtainReady, 'true');
+  const activationContacts = await page.evaluate(() => {
+    const state = window.__sandGpu.curtain(); let contacts = 0;
+    for (let i = 2; i < state.count * 4; i += 4) contacts += state.positions[i];
+    return contacts;
+  });
+  assert.equal(activationContacts, 0, 'Activating Play must not create cursor collisions in the newborn waterfall');
+  await page.screenshot({ path: 'artifacts/curtain-play-playing-desktop.png' });
   assert.equal(results.initial.curtainEffect, 'particle-waterfall');
   assert.equal(Number(results.initial.curtainGravity), 981);
   assert.equal(results.initial.curtainPoints, undefined);
@@ -540,9 +639,10 @@ try {
   await page.evaluate(() => window.scrollTo(0, 0));
 
   results.viewports = [];
-  for (const width of [320, 375, 768, 1024, 1920]) {
-    await page.setViewportSize({ width, height: width < 600 ? 812 : 900 });
+  for (const [width, height] of [[320, 812], [375, 812], [768, 900], [923, 805], [1024, 900], [1440, 900], [1900, 867], [1920, 1080]]) {
+    await page.setViewportSize({ width, height });
     await page.waitForTimeout(350);
+    await page.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal((await metrics()).sandReady, 'true');
     assertParticleBudget(await metrics(), width);
@@ -561,11 +661,28 @@ try {
     assert.equal(coverage.offscreenSources, 0, 'All curtain emitters must remain on screen after resize, including the mobile cover crop');
     assert.equal(coverage.offscreenFlows, 0);
     assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
-    results.viewports.push({ width, ...await metrics(), ...await stateSummary(), curtainCoverage: coverage });
+    const lettering = await logoLetterContainment(page);
+    assert.ok(lettering.containment >= .99, `Logo lettering must remain contained by the curtain at ${width} × ${height}; actual ${(lettering.containment * 100).toFixed(2)}%`);
+    assert.equal(lettering.outsideViewport, 0);
+    results.viewports.push({ width, height, ...await metrics(), ...await stateSummary(), curtainCoverage: coverage, lettering });
     if (width === 375) await page.screenshot({ path: 'artifacts/hero-gpu-mobile.png' });
+    if (width === 923) await page.screenshot({ path: 'artifacts/curtain-play-playing-halfscreen.png' });
+    if (width === 1900) await page.screenshot({ path: 'artifacts/curtain-play-playing-fullscreen.png' });
+  }
+  results.idleViewports = [];
+  for (const [width, height, name] of [[923, 805, 'halfscreen'], [1900, 867, 'fullscreen']]) {
+    const idlePage = await browser.newPage({ viewport: { width, height } });
+    await idlePage.addInitScript(observeCurtainWorkers);
+    await idlePage.goto(baseURL.href); await idlePage.waitForSelector('[data-sand-ready="true"]');
+    const idle = await assertIdleCurtain(idlePage), lettering = await logoLetterContainment(idlePage);
+    assert.ok(lettering.containment >= .99);
+    await idlePage.screenshot({ path: `artifacts/curtain-play-idle-${name}.png` });
+    results.idleViewports.push({ width, height, idle, lettering });
+    await idlePage.close();
   }
   const touchPage = await browser.newPage({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
   touchPage.setDefaultTimeout(12000);
+  await touchPage.addInitScript(observeCurtainWorkers);
   await touchPage.goto(baseURL.href); await touchPage.waitForSelector('[data-sand-ready="true"]');
   await touchPage.waitForTimeout(300);
   const touchRect = await touchPage.locator('[data-sand-frame]').boundingBox();
@@ -577,6 +694,17 @@ try {
     return contacts;
   });
   assert.ok(results.touchTap > 0);
+  results.touchIdle = await assertIdleCurtain(touchPage);
+  await touchPage.screenshot({ path: 'artifacts/curtain-play-idle-mobile.png' });
+  await playCurtain(touchPage, 'touch');
+  results.touchPlay = await touchPage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(Number(results.touchPlay.curtainPreparations), 1);
+  const touchActivationContacts = await touchPage.evaluate(() => {
+    const state = window.__sandGpu.curtain(); let contacts = 0;
+    for (let i = 2; i < state.count * 4; i += 4) contacts += state.positions[i];
+    return contacts;
+  });
+  assert.equal(touchActivationContacts, 0, 'Touching Play must not disturb the waterfall or launch a cursor sweep');
   assert.equal(await touchPage.locator('[data-logo-image]').isVisible(), true);
   assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-ready'), 'true');
   assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-effect'), 'particle-waterfall');
@@ -608,7 +736,9 @@ try {
     };
   });
   await workerFallbackPage.goto(baseURL.href);
-  await workerFallbackPage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  await workerFallbackPage.waitForSelector('[data-sand-ready="true"]');
+  await assertIdleCurtain(workerFallbackPage);
+  await playCurtain(workerFallbackPage);
   results.workerFailureFallback = await workerFallbackPage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
   assert.equal(results.workerFailureFallback.sandSeedPreparation, 'main-thread', 'A blocked Worker must initialize from the same pixels on the main thread');
   assertParticleBudget(results.workerFailureFallback, 390);
@@ -623,8 +753,11 @@ try {
     Object.defineProperty(navigator, 'hardwareConcurrency', { configurable: true, get: () => 2 });
     Object.defineProperty(navigator, 'deviceMemory', { configurable: true, get: () => 2 });
   });
+  await economyPage.addInitScript(observeCurtainWorkers);
   await economyPage.goto(baseURL.href);
-  await economyPage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  await economyPage.waitForSelector('[data-sand-ready="true"]');
+  await assertIdleCurtain(economyPage);
+  await playCurtain(economyPage);
   results.economyDevice = await economyPage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
   assert.equal(results.economyDevice.sandQuality, 'economy');
   assertParticleBudget(results.economyDevice, 390);
@@ -640,8 +773,15 @@ try {
   await racePage.addInitScript(() => {
     const NativeWorker = window.Worker;
     window.__seedWorkerJobs = 0;
+    window.__curtainWorkerJobs = 0;
+    window.__curtainImageJobs = 0;
     window.Worker = class extends NativeWorker {
-      postMessage(...args) { window.__seedWorkerJobs++; return super.postMessage(...args); }
+      postMessage(...args) {
+        window.__seedWorkerJobs++;
+        if (args[0]?.kind === 'curtain-prepare') window.__curtainWorkerJobs++;
+        if (args[0]?.kind === 'curtain-image') window.__curtainImageJobs++;
+        return super.postMessage(...args);
+      }
       set onmessage(callback) {
         super.onmessage = callback ? event => setTimeout(() => callback.call(this, event), 180) : null;
       }
@@ -651,12 +791,28 @@ try {
   await racePage.goto(baseURL.href, { waitUntil: 'domcontentloaded' });
   await racePage.waitForFunction(() => window.__seedWorkerJobs > 0);
   for (const width of [768, 390, 1024, 390]) await racePage.setViewportSize({ width, height: 844 });
+  await racePage.waitForSelector('[data-sand-ready="true"]');
+  await racePage.waitForTimeout(450);
+  results.idleResizeDuringStartup = await assertIdleCurtain(racePage);
+  assertParticleBudget(results.idleResizeDuringStartup, 390, false);
+  const raceFrameBefore = await racePage.locator('[data-sand-hero]').getAttribute('data-sand-time');
+  await racePage.locator('[data-curtain-play]').dispatchEvent('click');
+  await racePage.locator('[data-curtain-play]').dispatchEvent('click');
+  await racePage.waitForFunction(() => window.__curtainWorkerJobs === 1);
+  results.doublePlayDuringStartup = await racePage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(results.doublePlayDuringStartup.curtainState, 'loading');
+  assert.equal(Number(results.doublePlayDuringStartup.curtainPreparations), 1, 'Repeated activation while loading must reuse one preparation');
+  assert.equal(await racePage.locator('[data-curtain-play]').getAttribute('aria-busy'), 'true');
+  assert.equal(await racePage.locator('[data-curtain-play]').isDisabled(), true);
+  assert.ok(Number(results.doublePlayDuringStartup.sandTime) >= Number(raceFrameBefore), 'The frame clock must continue during waterfall preparation');
+  for (const width of [768, 390, 1024, 390]) await racePage.setViewportSize({ width, height: 844 });
   await racePage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
   await racePage.waitForTimeout(450);
   results.resizeDuringStartup = await racePage.evaluate(() => {
     const hero = document.querySelector('[data-sand-hero]'), canvas = document.querySelector('[data-sand-canvas]');
     return { ...hero.dataset, width: hero.clientWidth, height: hero.clientHeight,
-      canvasWidth: canvas.width, canvasHeight: canvas.height, workerJobs: window.__seedWorkerJobs };
+      canvasWidth: canvas.width, canvasHeight: canvas.height, workerJobs: window.__seedWorkerJobs,
+      curtainWorkerJobs: window.__curtainWorkerJobs };
   });
   assert.equal(results.resizeDuringStartup.width, 390);
   assert.equal(results.resizeDuringStartup.height, 844);
@@ -665,15 +821,27 @@ try {
   assert.equal(results.resizeDuringStartup.canvasWidth, 390, 'A stale desktop worker result must never replace the final mobile layout');
   assert.equal(results.resizeDuringStartup.canvasHeight, 844);
   assert.ok(results.resizeDuringStartup.workerJobs >= 2, 'Resize while initialization is pending must prepare a new generation');
+  assert.ok(results.resizeDuringStartup.curtainWorkerJobs >= 2, 'Resize during Play must discard the stale waterfall layout and prepare the current viewport');
   results.resizeDuringStartup.curtainCoverage = await racePage.evaluate(curtainViewportCoverage);
   assert.equal(results.resizeDuringStartup.curtainCoverage.offscreenSources, 0);
   assert.equal(results.resizeDuringStartup.curtainCoverage.offscreenFlows, 0);
+  assert.deepEqual(raceErrors, []);
+  // Play remains usable while a slower device is still preparing its frame.
+  await racePage.reload({ waitUntil: 'domcontentloaded' });
+  await racePage.waitForFunction(() => window.__seedWorkerJobs > 0);
+  assert.notEqual(await racePage.locator('[data-sand-hero]').getAttribute('data-sand-ready'), 'true');
+  await racePage.locator('[data-curtain-play]').dispatchEvent('click');
+  await racePage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  results.earlyPlay = await racePage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(Number(results.earlyPlay.curtainPreparations), 1, 'An early Play click must preserve user intent and start the curtain once the frame is ready');
+  assert.equal(await racePage.evaluate(() => window.__curtainWorkerJobs), 1);
   assert.deepEqual(raceErrors, []);
   await racePage.close();
 
   await page.emulateMedia({ reducedMotion: 'reduce' }); await page.reload();
   await page.waitForFunction(() => document.querySelector('[data-sand-status]').textContent.includes('movimiento reducido'));
   assert.equal(await page.locator('[data-sand-toggle]').isDisabled(), true);
+  assert.equal(await page.locator('[data-curtain-play]').isDisabled(), true);
   assert.equal(await page.locator('[data-sand-frame]').isVisible(), false);
   assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
   assert.equal(await page.locator('[data-curtain-image]').isVisible(), true);
@@ -682,6 +850,8 @@ try {
   results.reducedMotion = true;
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.reload();
   await page.waitForSelector('[data-sand-ready="true"]');
+  await assertIdleCurtain(page);
+  await playCurtain(page);
   await page.locator('[data-sand-canvas]').evaluate(canvas => canvas.getContext('webgl2').getExtension('WEBGL_lose_context').loseContext());
   await page.waitForSelector('[data-sand-ready="false"]');
   assert.equal(await page.locator('[data-sand-frame]').isVisible(), false);
@@ -698,6 +868,7 @@ try {
   await page.reload();
   await page.waitForSelector('[data-sand-ready="false"]');
   assert.equal(await page.locator('[data-sand-toggle]').isDisabled(), true);
+  assert.equal(await page.locator('[data-curtain-play]').isDisabled(), true);
   results.unsupportedGpuFallback = true;
   assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
   assert.equal(await page.locator('[data-curtain-image]').isVisible(), true);

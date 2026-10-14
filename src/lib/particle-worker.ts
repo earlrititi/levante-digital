@@ -1,4 +1,4 @@
-import { buildCurtainSeeds } from './curtain-seeds';
+import type { CurtainSeeds } from './curtain-seeds';
 import { buildParticleSeeds } from './sand-seeds';
 import type { ParticleSeedRequest, ParticleSeedResponse, PreparedParticleSeeds } from './particle-seed-messages';
 
@@ -22,6 +22,11 @@ function decode(bitmap: ImageBitmap): Raster {
   } finally { bitmap.close(); }
 }
 
+function curtainBuffers(seeds: CurtainSeeds): Transferable[] {
+  return [seeds.positions, seeds.velocities, seeds.sources, seeds.colors, seeds.indices, seeds.flows]
+    .map(array => array.buffer as ArrayBuffer);
+}
+
 function seedBuffers(seeds: PreparedParticleSeeds): Transferable[] {
   const arrays = [seeds.frame.positions, seeds.frame.velocities, seeds.frame.sources,
     seeds.frame.routes, seeds.frame.colors, seeds.frame.indices];
@@ -30,7 +35,7 @@ function seedBuffers(seeds: PreparedParticleSeeds): Transferable[] {
   return arrays.map(array => array.buffer as ArrayBuffer);
 }
 
-scope.onmessage = ({ data }) => {
+scope.onmessage = async ({ data }) => {
   try {
     if (data.kind === 'images') {
       frame = decode(data.frame);
@@ -38,11 +43,26 @@ scope.onmessage = ({ data }) => {
       scope.postMessage({ id: data.id, kind: 'ready' });
       return;
     }
+    if (data.kind === 'curtain-image') {
+      curtain = decode(data.curtain);
+      scope.postMessage({ id: data.id, kind: 'ready' });
+      return;
+    }
+    if (data.kind === 'curtain-prepare') {
+      if (!curtain) throw new Error('Curtain artwork is not ready');
+      const raster = curtain;
+      const { buildCurtainSeeds } = await import('./curtain-seeds');
+      const seeds = buildCurtainSeeds(raster.pixels, raster.width, raster.height,
+        data.rect, data.quality.curtainCount, data.viewport);
+      scope.postMessage({ id: data.id, kind: 'curtain-seeds', seeds }, curtainBuffers(seeds));
+      return;
+    }
     if (!frame) throw new Error('Particle artwork is not ready');
     const seeds: PreparedParticleSeeds = {
       frame: buildParticleSeeds(frame.pixels, frame.width, frame.height, data.frameRect, data.quality.frameCount),
     };
     if (curtain && data.curtainRect) {
+      const { buildCurtainSeeds } = await import('./curtain-seeds');
       seeds.curtain = buildCurtainSeeds(curtain.pixels, curtain.width, curtain.height,
         data.curtainRect, data.quality.curtainCount, data.viewport);
     }

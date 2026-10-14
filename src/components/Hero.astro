@@ -1,11 +1,15 @@
-<section class="hero" data-sand-hero aria-labelledby="hero-title">
+<section class="hero" data-sand-hero data-curtain-state="idle" aria-labelledby="hero-title">
   <h1 id="hero-title" class="sr-only">Levante Digital</h1>
   <img class="hero__background" src="/assets/images/fondo-def.webp" width="1672" height="941" alt="" fetchpriority="high" />
   <img class="hero__noise" src="/assets/images/noise-hero.webp" width="1920" height="1080" alt="" decoding="async" fetchpriority="low" />
   <img class="hero__curtain-static" data-curtain-image src="/assets/images/cortina-def.webp" width="1672" height="941" alt="" decoding="async" />
   <div class="hero__emitter" data-sand-frame data-sand-mask="/assets/images/marco.webp" aria-hidden="true"></div>
-  <canvas class="hero__sand" data-sand-canvas aria-hidden="true"></canvas>
+  <canvas id="hero-cascade" class="hero__sand" data-sand-canvas aria-hidden="true"></canvas>
   <img class="hero__logo" data-logo-image src="/assets/images/logo-hero-vector.svg" width="1200" height="443" alt="" decoding="async" fetchpriority="high" />
+  <button class="hero__play" type="button" data-curtain-play aria-controls="hero-cascade" aria-label="Reproducir cascada">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5a1 1 0 0 1 1.55-.84l11 7.5a1 1 0 0 1 0 1.68l-11 7.5A1 1 0 0 1 7 19.5z" /></svg>
+    <span data-curtain-play-label>Reproducir cascada</span>
+  </button>
 </section>
 
 <script>

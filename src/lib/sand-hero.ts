@@ -27,12 +27,30 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   const status = document.querySelector<HTMLElement>('[data-sand-status]');
   const resetButton = document.querySelector<HTMLButtonElement>('[data-sand-reset]');
   const toggleButton = document.querySelector<HTMLButtonElement>('[data-sand-toggle]');
+  const playButton = document.querySelector<HTMLButtonElement>('[data-curtain-play]');
+  const playLabel = playButton?.querySelector<HTMLElement>('[data-curtain-play-label]');
   if (!hero || !canvas || !emitter) return;
+  type CurtainState = 'idle' | 'loading' | 'playing' | 'paused' | 'unavailable';
+  let curtainState: CurtainState = 'idle';
+  function setCurtainState(state: CurtainState) {
+    curtainState = state; hero!.dataset.curtainState = state;
+    if (!playButton) return;
+    playButton.hidden = state === 'playing' || state === 'paused' || state === 'unavailable';
+    playButton.disabled = state === 'loading' || state === 'unavailable';
+    playButton.setAttribute('aria-busy', String(state === 'loading'));
+    const label = state === 'loading' ? 'Preparando cascada…' : 'Reproducir cascada';
+    playButton.setAttribute('aria-label', label);
+    if (playLabel) playLabel.textContent = label;
+  }
+  setCurtainState('idle');
+  hero.dataset.curtainReady = 'false'; hero.dataset.curtainParticles = '0';
+  hero.dataset.curtainPreparations = '0';
   const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
   const setStatus = (message: string) => { if (status) status.textContent = message; };
   const disableControls = () => {
     if (resetButton) resetButton.disabled = true;
     if (toggleButton) toggleButton.disabled = true;
+    setCurtainState('unavailable');
   };
   if (motionQuery.matches) {
     disableControls(); setStatus('Versión estática: tienes activada la preferencia de movimiento reducido.'); return;
@@ -45,7 +63,8 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   let engine: GpuSand | undefined;
   let seedClient: ParticleSeedClient | undefined;
   let quality: ParticleQuality | undefined;
-  let paused = false, disposed = false, imagesReady = false;
+  let paused = false, disposed = false, imagesReady = false, curtainStarted = false;
+  let curtainVersion = 0;
   let animation = 0, lastTime = 0, accumulator = 0, buildVersion = 0;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   const initialBounds = hero.getBoundingClientRect();
@@ -78,6 +97,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     metric('logoRendering', 'vector');
     metric('curtainEffect', 'particle-waterfall');
     metric('curtainParticles', String(engine?.curtainCount ?? 0));
+    metric('curtainPreparations', String(seedClient?.curtainPreparations ?? 0));
     metric('curtainGravity', '981');
   }
   function animate(time: number) {
@@ -114,36 +134,67 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     }
     return !disposed;
   }
+  function updateStatus() {
+    if (curtainState === 'loading') setStatus('Preparando la cascada…');
+    else if (paused) setStatus('Animación pausada.');
+    else if (curtainState === 'playing') setStatus('La cortina cae en partículas. Interrumpe la cascada con el cursor.');
+    else setStatus('Pulsa reproducir para iniciar la cascada. El marco ya responde al cursor.');
+  }
+  async function startCurtain() {
+    const target = engine;
+    if (!curtainStarted || !target || !curtain || !quality || !seedClient || disposed) return;
+    const version = ++curtainVersion, frameVersion = buildVersion;
+    const isCurrent = () => !disposed && version === curtainVersion && frameVersion === buildVersion && engine === target;
+    setCurtainState('loading'); updateStatus();
+    try {
+      await curtain.decode();
+      if (!isCurrent() || !await waitUntilVisible() || !isCurrent()) return;
+      const bounds = hero!.getBoundingClientRect();
+      const width = Math.round(bounds.width), height = Math.round(bounds.height);
+      const scale = Math.max(width / 1672, height / 941);
+      const rect = { x: (width - 1672 * scale) / 2, y: (height - 941 * scale) / 2,
+        width: curtain.naturalWidth * scale, height: curtain.naturalHeight * scale };
+      const seedsPromise = seedClient.prepareCurtain(curtain, rect, quality, { width, height });
+      metrics();
+      const seeds = await seedsPromise;
+      if (!isCurrent() || !await waitUntilVisible() || !isCurrent()) return;
+      await target.attachCurtain(curtain, rect, seeds);
+      if (!isCurrent()) return;
+      target.draw(cursor); hero!.dataset.curtainReady = 'true';
+      setCurtainState(paused ? 'paused' : 'playing'); metrics(); updateStatus(); start();
+    } catch {
+      if (!isCurrent()) return;
+      hero!.dataset.curtainReady = 'false'; setCurtainState('idle'); metrics();
+      setStatus('No se ha podido iniciar la cascada. Puedes volver a pulsar reproducir.');
+    }
+  }
+  function onPlay() {
+    if (disposed || curtainState === 'loading' || engine?.curtainCount) return;
+    curtainStarted = true; cursor.active = false;
+    setCurtainState('loading'); updateStatus();
+    // Early clicks retain the user's intent while the frame finishes loading.
+    if (engine) void startCurtain();
+  }
   async function rebuild() {
     const version = ++buildVersion;
+    ++curtainVersion;
     stop(); engine?.dispose(); engine = undefined;
     hero!.dataset.sandReady = 'false'; hero!.dataset.curtainReady = 'false'; delete window.__sandGpu;
+    if (curtainStarted) { setCurtainState('loading'); updateStatus(); }
     if (!renderer || !SandEngine || !SeedClient || !imagesReady || !await waitUntilVisible() || version !== buildVersion) return;
     const bounds = hero!.getBoundingClientRect(), artwork = emitter!.getBoundingClientRect();
     const width = Math.round(bounds.width), height = Math.round(bounds.height);
     if (width < 1 || height < 1) return;
     const frameRect: FrameRect = { x: artwork.left - bounds.left, y: artwork.top - bounds.top,
       width: artwork.width, height: artwork.height };
-    // Both definitive assets share the native full canvas. Background decoding is independent.
-    const nativeWidth = 1672, nativeHeight = 941;
-    const scale = Math.max(width / nativeWidth, height / nativeHeight);
-    const curtainImage = curtain?.naturalWidth ? curtain : undefined;
-    const curtainRect = curtainImage ? { x: (width - nativeWidth * scale) / 2, y: (height - nativeHeight * scale) / 2,
-      width: curtainImage.naturalWidth * scale, height: curtainImage.naturalHeight * scale } : undefined;
     const nextQuality = getParticleQuality(width, height);
     seedClient ??= new SeedClient();
     try {
-      const seeds = await seedClient.prepare(frame, curtainImage, frameRect, curtainRect, nextQuality, { width, height });
+      const seeds = await seedClient.prepare(frame, undefined, frameRect, undefined, nextQuality, { width, height });
       if (disposed || version !== buildVersion || !await waitUntilVisible() || version !== buildVersion) return;
       renderer.dpr = nextQuality.pixelRatio; renderer.setSize(width, height);
       quality = nextQuality;
       engine = new SandEngine(renderer, frame, frameRect, width, height, nextQuality, seeds.frame);
-      if (curtainImage && curtainRect && seeds.curtain) {
-        try {
-          engine.attachCurtain(curtainImage, curtainRect, seeds.curtain);
-          hero!.dataset.curtainReady = 'true';
-        } catch { hero!.dataset.curtainReady = 'false'; }
-      }
       if (debug) window.__sandGpu = {
         snapshot: () => engine!.snapshot(), sources: () => engine!.sourcesForVerification(), routes: () => engine!.routesForVerification(),
         setParticle: (index, position, velocity) => engine!.setParticleForVerification(index, position, velocity),
@@ -160,11 +211,15 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
         performance.mark('particle-ready');
         performance.measure('particle-startup', 'particle-init', 'particle-ready');
       }
-      setStatus(paused ? 'Animación pausada.' : 'La cortina cae en partículas. Interrumpe la cascada con el cursor.');
+      updateStatus();
       start();
+      if (curtainStarted) void startCurtain();
     } catch { if (!disposed && version === buildVersion) fail(); }
   }
   function onPointerMove(event: PointerEvent) {
+    if (event.target instanceof Element && event.target.closest('[data-curtain-play]')) {
+      cursor.active = false; return;
+    }
     if (event.pointerType !== 'mouse' && event.buttons === 0) return;
     const bounds = hero!.getBoundingClientRect();
     const x = event.clientX - bounds.left, y = event.clientY - bounds.top;
@@ -185,13 +240,15 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     toggleButton!.setAttribute('aria-pressed', String(paused));
     toggleButton!.textContent = paused ? 'Reanudar animación' : 'Pausar animación';
     if (paused) stop(); else start();
-    setStatus(paused ? 'Animación pausada.' : 'La cortina cae en partículas. Interrumpe la cascada con el cursor.');
+    if (engine?.curtainCount) setCurtainState(paused ? 'paused' : 'playing');
+    updateStatus();
   }
   function onReset() { cursor.active = false; engine?.reset(); engine?.draw(cursor); metrics(); }
   function onResize() {
     if (!imagesReady || disposed) return;
     // Invalidate an in-flight result immediately; debounce the next preparation job.
     ++buildVersion;
+    ++curtainVersion;
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { if (!disposed) void rebuild(); }, 180);
   }
@@ -218,15 +275,17 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   }
   function dispose() {
     if (disposed) return;
-    disposed = true; ++buildVersion; stop(); clearTimeout(resizeTimer); engine?.dispose(); engine = undefined;
+    disposed = true; ++buildVersion; ++curtainVersion; stop(); clearTimeout(resizeTimer); engine?.dispose(); engine = undefined;
     seedClient?.dispose(); releaseVisibilityWaiters();
     hero!.dataset.sandReady = 'false'; delete window.__sandGpu;
     hero!.dataset.curtainReady = 'false';
+    hero!.dataset.curtainParticles = '0'; setCurtainState('unavailable');
     visibilityObserver.disconnect(); resizeObserver.disconnect();
     hero!.removeEventListener('pointermove', onPointerMove); hero!.removeEventListener('pointerdown', onPointerMove);
     hero!.removeEventListener('pointerleave', onPointerLeave); hero!.removeEventListener('pointerup', onPointerUp);
     hero!.removeEventListener('pointercancel', onPointerLeave);
     toggleButton?.removeEventListener('click', onToggle); resetButton?.removeEventListener('click', onReset);
+    playButton?.removeEventListener('click', onPlay);
     document.removeEventListener('visibilitychange', onVisibility); window.removeEventListener('pagehide', dispose);
     motionQuery.removeEventListener('change', onMotionChange); canvas!.removeEventListener('webglcontextlost', onContextLost);
   }
@@ -234,6 +293,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   hero.addEventListener('pointerleave', onPointerLeave); hero.addEventListener('pointerup', onPointerUp);
   hero.addEventListener('pointercancel', onPointerLeave);
   toggleButton?.addEventListener('click', onToggle); resetButton?.addEventListener('click', onReset);
+  playButton?.addEventListener('click', onPlay);
   document.addEventListener('visibilitychange', onVisibility); window.addEventListener('pagehide', dispose);
   motionQuery.addEventListener('change', onMotionChange); canvas.addEventListener('webglcontextlost', onContextLost);
   visibilityObserver.observe(hero); resizeObserver.observe(hero);
@@ -254,8 +314,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     }
     renderer.gl.clearColor(0, 0, 0, 0);
     frame.src = emitter.dataset.sandMask!;
-    const [gpuModule, seedModule] = await Promise.all([import('./gpu-sand'), import('./particle-seed-client'),
-      frame.decode(), curtain?.decode().catch(() => undefined)]);
+    const [gpuModule, seedModule] = await Promise.all([import('./gpu-sand'), import('./particle-seed-client'), frame.decode()]);
     if (disposed) return dispose;
     SandEngine = gpuModule.GpuSand; SeedClient = seedModule.ParticleSeedClient;
     imagesReady = true;

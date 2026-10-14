@@ -1,4 +1,5 @@
 import type { FrameRect } from './sand-seeds';
+import type { CurtainSeeds } from './curtain-seeds';
 import type { ParticleSeedCounts, ParticleSeedRequest, ParticleSeedResponse,
   ParticleViewport, PreparedParticleSeeds } from './particle-seed-messages';
 
@@ -8,8 +9,10 @@ type Pending = { resolve: (response: ParticleSeedResponse) => void; reject: (err
 /** Native pixels stay cached in the worker; only finished GPU buffers return to the page. */
 export class ParticleSeedClient {
   mode: 'worker' | 'main-thread' = 'main-thread';
+  curtainPreparations = 0;
   private worker?: Worker;
   private initialisation?: Promise<void>;
+  private curtainInitialisation?: Promise<void>;
   private nextId = 0;
   private pending = new Map<number, Pending>();
   private rasters = new WeakMap<HTMLImageElement, Raster>();
@@ -44,26 +47,31 @@ export class ParticleSeedClient {
     });
   }
 
-  private initialise(frame: HTMLImageElement, curtain?: HTMLImageElement): Promise<void> {
+  private initialise(frame: HTMLImageElement): Promise<void> {
     this.initialisation ??= (async () => {
-      const images = await Promise.allSettled([createImageBitmap(frame),
-        curtain ? createImageBitmap(curtain) : Promise.resolve(undefined)]);
-      if (this.disposed || images.some(image => image.status === 'rejected')) {
-        for (const image of images) if (image.status === 'fulfilled') image.value?.close();
-        throw new Error(this.disposed ? 'Particle preparation was cancelled' : 'Unable to decode the particle artwork');
-      }
-      const frameBitmap = (images[0] as PromiseFulfilledResult<ImageBitmap>).value;
-      const curtainBitmap = (images[1] as PromiseFulfilledResult<ImageBitmap | undefined>).value;
-      const transfer: Transferable[] = curtainBitmap ? [frameBitmap, curtainBitmap] : [frameBitmap];
+      const frameBitmap = await createImageBitmap(frame);
+      if (this.disposed) { frameBitmap.close(); throw new Error('Particle preparation was cancelled'); }
       try {
-        await this.request({ id: ++this.nextId, kind: 'images', frame: frameBitmap, curtain: curtainBitmap }, transfer);
+        await this.request({ id: ++this.nextId, kind: 'images', frame: frameBitmap }, [frameBitmap]);
       } catch (error) {
         // A failed postMessage may leave ownership in the page.
-        frameBitmap.close(); curtainBitmap?.close(); throw error;
+        frameBitmap.close(); throw error;
       }
       this.mode = 'worker';
     })();
     return this.initialisation;
+  }
+
+  private initialiseCurtain(image: HTMLImageElement): Promise<void> {
+    this.curtainInitialisation ??= (async () => {
+      const bitmap = await createImageBitmap(image);
+      if (this.disposed) { bitmap.close(); throw new Error('Particle preparation was cancelled'); }
+      try {
+        await this.request({ id: ++this.nextId, kind: 'curtain-image', curtain: bitmap }, [bitmap]);
+      } catch (error) { bitmap.close(); throw error; }
+      this.mode = 'worker';
+    })();
+    return this.curtainInitialisation;
   }
 
   private nativeRaster(image: HTMLImageElement): Raster {
@@ -86,7 +94,8 @@ export class ParticleSeedClient {
     if (this.disposed) throw new Error('Particle preparation was cancelled');
     if (this.worker) {
       try {
-        await this.initialise(frame, curtain);
+        await this.initialise(frame);
+        if (curtain && curtainRect) await this.initialiseCurtain(curtain);
         const response = await this.request({ id: ++this.nextId, kind: 'prepare', frameRect, curtainRect, quality, viewport });
         if (response.kind !== 'seeds') throw new Error('Unexpected particle worker response');
         return response.seeds;
@@ -97,19 +106,39 @@ export class ParticleSeedClient {
     }
     // Older browsers keep the same visual fallback path, without decoding twice on resize.
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    const [{ buildParticleSeeds }, { buildCurtainSeeds }] = await Promise.all([
-      import('./sand-seeds'), import('./curtain-seeds'),
-    ]);
+    const { buildParticleSeeds } = await import('./sand-seeds');
     if (this.disposed) throw new Error('Particle preparation was cancelled');
     const frameRaster = this.nativeRaster(frame);
     const seeds: PreparedParticleSeeds = {
       frame: buildParticleSeeds(frameRaster.pixels, frameRaster.width, frameRaster.height, frameRect, quality.frameCount),
     };
     if (curtain && curtainRect) {
-      const raster = this.nativeRaster(curtain);
-      seeds.curtain = buildCurtainSeeds(raster.pixels, raster.width, raster.height, curtainRect, quality.curtainCount, viewport);
+      seeds.curtain = await this.prepareCurtain(curtain, curtainRect, quality, viewport);
     }
     return seeds;
+  }
+
+  /** Called only after the user asks to play; frame preparation never touches this mask. */
+  async prepareCurtain(image: HTMLImageElement, rect: FrameRect, quality: ParticleSeedCounts,
+    viewport: ParticleViewport): Promise<CurtainSeeds> {
+    if (this.disposed) throw new Error('Particle preparation was cancelled');
+    this.curtainPreparations++;
+    if (this.worker) {
+      try {
+        await this.initialiseCurtain(image);
+        const response = await this.request({ id: ++this.nextId, kind: 'curtain-prepare', rect, quality, viewport });
+        if (response.kind !== 'curtain-seeds') throw new Error('Unexpected particle worker response');
+        return response.seeds;
+      } catch (error) {
+        if (this.disposed) throw error;
+        this.disableWorker(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    const { buildCurtainSeeds } = await import('./curtain-seeds');
+    if (this.disposed) throw new Error('Particle preparation was cancelled');
+    const raster = this.nativeRaster(image);
+    return buildCurtainSeeds(raster.pixels, raster.width, raster.height, rect, quality.curtainCount, viewport);
   }
 
   private disableWorker(error: Error) {
@@ -122,6 +151,6 @@ export class ParticleSeedClient {
     if (this.disposed) return;
     this.disposed = true;
     this.disableWorker(new Error('Particle preparation was cancelled'));
-    this.rasters = new WeakMap(); this.initialisation = undefined;
+    this.rasters = new WeakMap(); this.initialisation = undefined; this.curtainInitialisation = undefined;
   }
 }

@@ -13,7 +13,12 @@ button { font: inherit; }
 .hero[data-sand-ready="true"][data-curtain-ready="true"] .hero__curtain-static { visibility: hidden; }
 .hero__sand { z-index: 3; opacity: 0; }
 .hero[data-sand-ready="true"] .hero__sand { opacity: 1; }
-.hero__logo { position: absolute; top: 50%; left: max(calc(24px - var(--logo-width) * .085), calc(50% - 306 * var(--scene-pixel) - var(--logo-width) * .466667)); transform: translateY(-54.3%); width: var(--logo-width); height: auto; z-index: 10; mix-blend-mode: normal; pointer-events: none; }
+.hero__logo { position: absolute; top: 50%; left: max(calc(24px - var(--logo-width) * .085), calc(50% - 236 * var(--scene-pixel) - var(--logo-width) * .466667)); transform: translateY(-54.3%); width: var(--logo-width); height: auto; z-index: 10; mix-blend-mode: normal; pointer-events: none; }
+.hero__play { position: absolute; z-index: 11; left: 50%; top: calc(50% + 100px); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 12px; min-height: 52px; padding: 13px 20px; border: 1px solid rgb(255 255 255 / 70%); border-radius: 999px; background: rgb(255 249 237 / 88%); color: #49301d; box-shadow: 0 3px 18px rgb(70 36 13 / 12%); font-size: 13px; cursor: pointer; }
+.hero__play svg { width: 18px; height: 18px; flex: none; }
+.hero__play:hover { background: #fff9ed; }
+.hero__play:disabled { cursor: wait; opacity: .75; }
+.hero__play[hidden] { display: none; }
 .prototype { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 20px 40px; padding: 34px clamp(22px, 4vw, 76px); border-top: 1px solid #d6c6b4; }
 .eyebrow { font-size: 10px; letter-spacing: .18em; margin: 0 0 10px; }
 .prototype__instruction { font-size: 15px; margin: 0; }
@@ -22,6 +27,6 @@ button { font: inherit; }
 .prototype button:hover { background: #e7dbcb; }
 .prototype button:disabled { cursor: default; opacity: .5; }
 .prototype__status { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #705a48; }
-@media (max-width: 899px) { .hero__logo { left: 50%; width: 70%; transform: translate(-50%, -54.3%); } }
+@media (max-width: 899px) { .hero__logo { left: 50%; width: 70%; transform: translate(-50%, -54.3%); } .hero__play { top: calc(50% + 70px); } }
 @media (max-width: 600px) { .prototype { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .hero__sand { display: none; } }

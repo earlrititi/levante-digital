@@ -35,6 +35,7 @@ export class GpuSand {
   private glow?: ParticleGlow;
   private curtain?: GpuCurtain;
   private curtainPaused = false;
+  private curtainVisible = false;
   private positionUniform!: Uniform<Texture>;
   private velocityUniform!: Uniform<Texture>;
   private computePosition!: Uniform<Texture>;
@@ -185,6 +186,7 @@ export class GpuSand {
   get curtainCount() { return this.curtain?.count ?? 0; }
 
   setCurtainPaused(paused: boolean) { this.curtainPaused = paused; }
+  setCurtainVisible(visible: boolean) { this.curtainVisible = visible; }
 
   async attachCurtain(image: HTMLImageElement, rect: FrameRect, prepared?: CurtainSeeds) {
     const { GpuCurtain: CurtainEngine } = await import('./gpu-curtain');
@@ -235,7 +237,7 @@ export class GpuSand {
     if (!this.curtainPaused) this.curtain?.step(dt, cursor);
   }
 
-  draw(cursor: GpuCursor) {
+  draw(cursor: GpuCursor, curtainVisible = this.curtainVisible) {
     if (this.disposed || this.gl.isContextLost()) return;
     this.positionUniform.value = this.read.textures[0]!;
     this.velocityUniform.value = this.read.textures[1]!;
@@ -244,8 +246,9 @@ export class GpuSand {
     this.sparkVelocity.value = this.sparkRead.textures[1]!;
     this.cursorUniform.value[0] = cursor.x; this.cursorUniform.value[1] = cursor.y;
     this.cursorUniform.value[2] = cursor.radius; this.cursorUniform.value[3] = cursor.active ? 1 : 0;
-    this.curtain?.drawParticles(this.glow!.particles, this.glow!.pixelRatio);
-    this.renderer.render({ scene: this.particles, target: this.glow!.particles, clear: !this.curtain, sort: false, frustumCull: false });
+    const drawCurtain = curtainVisible && !!this.curtain;
+    if (drawCurtain) this.curtain!.drawParticles(this.glow!.particles, this.glow!.pixelRatio);
+    this.renderer.render({ scene: this.particles, target: this.glow!.particles, clear: !drawCurtain, sort: false, frustumCull: false });
     if (this.time < this.sparksActiveUntil) {
       this.renderer.render({ scene: this.sparks, target: this.glow!.particles, clear: false, sort: false, frustumCull: false });
     }

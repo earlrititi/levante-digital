@@ -82,6 +82,60 @@ async function playCurtain(target, input = 'click') {
   await target.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
   await assertCurtainControl(target, true);
 }
+async function assertCurtainPoster(target) {
+  const poster = await target.evaluate(() => {
+    const image = document.querySelector('[data-curtain-image]'), hero = document.querySelector('[data-sand-hero]');
+    const style = getComputedStyle(image);
+    return { source: new URL(image.src).pathname, state: hero.dataset.curtainState,
+      visible: style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) === 1,
+      interiorParticles: window.__sandGpu.glow(hero.clientWidth * .5, hero.clientHeight * .72).particles };
+  });
+  assert.equal(poster.state, 'paused');
+  assert.equal(poster.source, '/assets/images/cortina-def.webp');
+  assert.equal(poster.visible, true, 'Pause must display the original curtain image');
+  assert.equal(poster.interiorParticles[3], 0, 'The shared HDR target must contain no frozen curtain grains after Pause');
+  const actual = await target.screenshot();
+  const previousDisplay = await target.locator('[data-sand-canvas]').evaluate(canvas => {
+    const value = canvas.style.display; canvas.style.display = 'none'; return value;
+  });
+  let expected;
+  try { expected = await target.screenshot(); }
+  finally { await target.locator('[data-sand-canvas]').evaluate((canvas, value) => canvas.style.display = value, previousDisplay); }
+  const pixels = await target.evaluate(async ({ actual, expected }) => {
+    const decode = async bytes => {
+      const image = new Image(); image.src = 'data:image/png;base64,' + bytes; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d', { willReadFrequently: true }); context.drawImage(image, 0, 0);
+      return { width: canvas.width, height: canvas.height, data: context.getImageData(0, 0, canvas.width, canvas.height).data };
+    };
+    const a = await decode(actual), b = await decode(expected), ratio = a.width / innerWidth;
+    const hero = document.querySelector('[data-sand-hero]').getBoundingClientRect();
+    const logo = document.querySelector('[data-logo-image]').getBoundingClientRect();
+    const button = document.querySelector('[data-curtain-play]').getBoundingClientRect();
+    const image = document.querySelector('[data-curtain-image]'), scale = Math.max(hero.width / image.naturalWidth, hero.height / image.naturalHeight);
+    const maskCanvas = document.createElement('canvas'); maskCanvas.width = a.width; maskCanvas.height = a.height;
+    const context = maskCanvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, (hero.left + (hero.width - image.naturalWidth * scale) / 2) * ratio,
+      (hero.top + (hero.height - image.naturalHeight * scale) / 2) * ratio,
+      image.naturalWidth * scale * ratio, image.naturalHeight * scale * ratio);
+    const mask = context.getImageData(0, 0, a.width, a.height).data;
+    const within = (x, y, bounds) => x >= bounds.left - 8 && x <= bounds.right + 8 && y >= bounds.top - 8 && y <= bounds.bottom + 8;
+    let tested = 0, changed = 0, maxDifference = 0;
+    for (let y = 0; y < a.height; y++) for (let x = 0; x < a.width; x++) {
+      const px = x / ratio, py = y / ratio, offset = (y * a.width + x) * 4;
+      if (mask[offset + 3] < 240 || px < hero.left + 100 || px > hero.right - 100
+        || py < hero.top + 100 || py > hero.bottom - 100 || within(px, py, logo) || within(px, py, button)) continue;
+      tested++;
+      const difference = Math.max(...[0, 1, 2].map(channel => Math.abs(a.data[offset + channel] - b.data[offset + channel])));
+      maxDifference = Math.max(maxDifference, difference);
+      if (difference > 3) changed++;
+    }
+    return { tested, changed, maxDifference };
+  }, { actual: actual.toString('base64'), expected: expected.toString('base64') });
+  assert.ok(pixels.tested > 1000, 'The original poster must be compared across a substantial opaque curtain region');
+  assert.equal(pixels.changed, 0, 'Paused curtain pixels must match the original image composition, without a frozen particle overlay');
+  return { ...poster, pixels };
+}
 async function verifyCurtainToggle(target, input = 'click') {
   const before = await target.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
   const seeds = await target.evaluate(() => Array.from(window.__sandGpu.curtain().sources));
@@ -96,6 +150,7 @@ async function verifyCurtainToggle(target, input = 'click') {
     'Pausing the cascade must freeze its actual GPU positions');
   assert.ok(Number(await target.locator('[data-sand-hero]').getAttribute('data-sand-time')) > frameTime,
     'The frame must keep moving while only the cascade is paused');
+  const poster = await assertCurtainPoster(target);
   await target.screenshot({ path: `artifacts/curtain-persistent-control-paused-${input === 'touch' ? 'mobile' : 'desktop'}.png` });
   await activateCurtainControl(target, input);
   await target.waitForSelector('[data-curtain-state="playing"]');
@@ -109,9 +164,9 @@ async function verifyCurtainToggle(target, input = 'click') {
   assert.equal(await target.evaluate(() => window.__curtainWorkerJobs ?? 0), jobs, 'Playback toggles must reuse the worker result');
   assert.equal(after.curtainParticles, before.curtainParticles);
   return { input, frameTimeBefore: frameTime, frameTimeAfter: Number(after.sandTime),
-    preparations: Number(after.curtainPreparations), workerJobs: jobs, particles: Number(after.curtainParticles) };
+    preparations: Number(after.curtainPreparations), workerJobs: jobs, particles: Number(after.curtainParticles), poster };
 }
-async function logoLetterContainment(target) {
+async function logoContainment(target) {
   return target.evaluate(async () => {
     const logo = document.querySelector('[data-logo-image]'), curtain = document.querySelector('[data-curtain-image]');
     const hero = document.querySelector('[data-sand-hero]');
@@ -125,20 +180,30 @@ async function logoLetterContainment(target) {
     const h = hero.getBoundingClientRect(), l = logo.getBoundingClientRect();
     const scale = Math.max(h.width / maskCanvas.width, h.height / maskCanvas.height);
     const originX = (h.width - maskCanvas.width * scale) / 2, originY = (h.height - maskCanvas.height * scale) / 2;
-    let inside = 0, total = 0, outsideViewport = 0;
-    // The symbol ends before native x=548. Test painted letter pixels rather than SVG whitespace or the symbol.
-    for (let y = 0; y < 443; y++) for (let x = 548; x < 1200; x++) {
+    let inside = 0, total = 0, outsideViewport = 0, minX = Infinity, maxX = -Infinity;
+    // Desktop containment includes the full painted symbol and both rows of lettering.
+    const desktop = h.width >= 900, firstX = desktop ? 0 : 548;
+    for (let y = 0; y < 443; y++) for (let x = firstX; x < 1200; x++) {
       if (ink[(y * 1200 + x) * 4 + 3] < 128) continue;
       total++;
       const px = l.left - h.left + (x + .5) / 1200 * l.width;
       const py = l.top - h.top + (y + .5) / 443 * l.height;
       const mx = Math.floor((px - originX) / scale), my = Math.floor((py - originY) / scale);
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
       if (px < 0 || py < 0 || px >= h.width || py >= h.height) outsideViewport++;
       if (mx >= 0 && my >= 0 && mx < maskCanvas.width && my < maskCanvas.height
         && mask[(my * maskCanvas.width + mx) * 4 + 3] >= 128) inside++;
     }
+    const centerY = l.top - h.top + l.height * .5, row = Math.floor((centerY - originY) / scale);
+    let curtainLeft = Infinity, curtainRight = -Infinity;
+    for (let x = 0; x < maskCanvas.width; x++) if (mask[(row * maskCanvas.width + x) * 4 + 3] >= 128) {
+      const px = originX + (x + .5) * scale;
+      if (px >= 0 && px < h.width) { curtainLeft = Math.min(curtainLeft, px); curtainRight = Math.max(curtainRight, px); }
+    }
     return { viewport: { width: h.width, height: h.height }, logo: { x: l.left - h.left, y: l.top - h.top, width: l.width, height: l.height },
-      paintedLetterPixels: total, inside, outsideViewport, containment: inside / total };
+      scope: desktop ? 'full-logo' : 'lettering', paintedPixels: total, inside, outsideViewport, containment: inside / total,
+      paintedCenterX: (minX + maxX) / 2, curtainCenterX: (curtainLeft + curtainRight) / 2,
+      centerOffset: Math.abs((minX + maxX - curtainLeft - curtainRight) / 2) };
   });
 }
 function curtainViewportCoverage() {
@@ -183,8 +248,9 @@ try {
   assert.equal(results.initial.logoEffect, 'none');
   assert.equal(results.initial.logoParticles, undefined);
   results.idleCurtain = await assertIdleCurtain(page);
-  results.initialLogoContainment = await logoLetterContainment(page);
-  assert.ok(results.initialLogoContainment.containment >= .99, 'At least 99% of the painted lettering must lie inside the curtain');
+  results.initialLogoContainment = await logoContainment(page);
+  assert.equal(results.initialLogoContainment.containment, 1, 'Every painted symbol and letter pixel must lie inside the desktop curtain');
+  assert.ok(results.initialLogoContainment.centerOffset < 12, 'The complete desktop logo must be centered in the curtain body');
   assert.equal(results.initialLogoContainment.outsideViewport, 0);
   await page.screenshot({ path: 'artifacts/curtain-play-idle-desktop.png' });
   const idleLogo = await page.locator('[data-logo-image]').boundingBox();
@@ -213,6 +279,7 @@ try {
   await page.locator('[data-sand-toggle]').click();
   await page.waitForSelector('[data-sand-paused="true"][data-curtain-state="paused"]');
   await assertCurtainControl(page, false);
+  results.globalPausePoster = await assertCurtainPoster(page);
   await activateCurtainControl(page);
   await page.waitForSelector('[data-sand-paused="false"][data-curtain-state="playing"]');
   await assertCurtainControl(page, true);
@@ -231,6 +298,7 @@ try {
     'Global resume must preserve an explicit cascade pause');
   assert.ok(Number((await metrics()).sandTime) > locallyPausedFrameTime);
   await assertCurtainControl(page, false);
+  results.localPausePosterAfterGlobalToggle = await assertCurtainPoster(page);
   await activateCurtainControl(page);
   await page.waitForSelector('[data-curtain-state="playing"]');
   results.localCurtainPauseSurvivesGlobalToggle = true;
@@ -405,6 +473,7 @@ try {
   assert.equal(results.staticLogo.logoBlend, 'normal');
   await page.mouse.move(1300, 650);
   await page.evaluate(() => document.querySelector('[data-sand-toggle]').click());
+  results.posterBeforeShaderDiagnostics = await assertCurtainPoster(page);
   results.curtainFlow = await page.evaluate(() => {
     const gpu = window.__sandGpu;
     const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
@@ -453,10 +522,16 @@ try {
     assert.equal(state.detached, 0); assert.equal(state.contacts, 0); assert.equal(state.finite, true);
   }
   assert.equal(results.curtainFlow.resetError, 0, 'Reset must restore both GPU position and velocity textures exactly');
+  // Explicit diagnostic draws inspect the actual shaders while the user-facing pause remains a poster.
+  await page.evaluate(() => {
+    document.querySelector('[data-curtain-image]').style.visibility = 'hidden';
+    window.__sandGpu.redraw(true);
+  });
   const initialCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-initial.png' });
   await page.evaluate(() => {
     const none = { x: -1000, y: -1000, previousX: -1000, previousY: -1000, radius: 10, active: false };
     for (let tick = 0; tick < 12; tick++) window.__sandGpu.step(1 / 120, none);
+    window.__sandGpu.redraw(true);
   });
   const animatedCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-animated.png' });
   results.curtainAnimation = await page.evaluate(async ({ initial, animated }) => {
@@ -482,7 +557,7 @@ try {
   }, { initial: initialCurtain.toString('base64'), animated: animatedCurtain.toString('base64') });
   assert.ok(results.curtainAnimation.inside > 100000);
   assert.ok(results.curtainAnimation.changedInside > 10000, 'GPU particles must visibly flow throughout the curtain');
-  await page.evaluate(() => window.__sandGpu.reset());
+  await page.evaluate(() => { window.__sandGpu.reset(); window.__sandGpu.redraw(true); });
   const restoredCurtain = await page.screenshot({ path: 'artifacts/curtain-waterfall-restored.png' });
   assert.deepEqual(restoredCurtain, initialCurtain, 'Reset must restore the same particle artwork and static logo');
   results.curtainPhysics = await page.evaluate(() => {
@@ -548,6 +623,7 @@ try {
     if (!outsidePoint) throw new Error('The supplied curtain must have transparent space for the detached rendering probe');
     gpu.setCurtainParticle(index, [...outsidePoint, 0, 1], [0, 0, seed, .1]);
     gpu.step(1 / 120, none);
+    gpu.redraw(true);
     const detachedOutsideMask = particle(), glow = gpu.glow(detachedOutsideMask.position[0], detachedOutsideMask.position[1]);
     const rendererMask = getComputedStyle(document.querySelector('[data-sand-canvas]')).maskImage;
     const glError = document.querySelector('[data-sand-canvas]').getContext('webgl2').getError();
@@ -587,6 +663,11 @@ try {
   assert.equal(curtainPhysics.rendererMask, 'none');
   assert.ok(curtainPhysics.glow.particles[3] > 0, 'Detached curtain grains must still render outside their original silhouette');
   assert.equal(curtainPhysics.glError, 0);
+  await page.evaluate(() => {
+    document.querySelector('[data-curtain-image]').style.removeProperty('visibility');
+    window.__sandGpu.redraw();
+  });
+  results.posterAfterShaderDiagnostics = await assertCurtainPoster(page);
   await page.locator('[data-sand-toggle]').click();
   const rect = await page.locator('[data-sand-frame]').boundingBox();
   await page.mouse.move(rect.x + 1, rect.y + rect.height * .45);
@@ -610,6 +691,7 @@ try {
   assert.equal((await metrics()).sandTime, pausedTime);
   assert.deepEqual(await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), pausedCurtain,
     'Pause must freeze the actual waterfall GPU texture');
+  results.posterAfterCursorCollisions = await assertCurtainPoster(page);
   results.shaderPhysics = await page.evaluate(() => {
     const gpu = window.__sandGpu;
     gpu.reset();
@@ -731,8 +813,9 @@ try {
     assert.equal(coverage.offscreenSources, 0, 'All curtain emitters must remain on screen after resize, including the mobile cover crop');
     assert.equal(coverage.offscreenFlows, 0);
     assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
-    const lettering = await logoLetterContainment(page);
-    assert.ok(lettering.containment >= .99, `Logo lettering must remain contained by the curtain at ${width} × ${height}; actual ${(lettering.containment * 100).toFixed(2)}%`);
+    const lettering = await logoContainment(page);
+    assert.ok(lettering.containment >= (width >= 900 ? 1 : .99), `The ${lettering.scope} must remain contained by the curtain at ${width} x ${height}; actual ${(lettering.containment * 100).toFixed(2)}%`);
+    if (width >= 900) assert.ok(lettering.centerOffset < 12, `The complete logo must remain centered at ${width} x ${height}`);
     assert.equal(lettering.outsideViewport, 0);
     results.viewports.push({ width, height, ...await metrics(), ...await stateSummary(), curtainCoverage: coverage, lettering });
     if (width === 375) await page.screenshot({ path: 'artifacts/hero-gpu-mobile.png' });
@@ -751,6 +834,8 @@ try {
   assert.deepEqual(await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), resizedPaused,
     'Rebuilding the viewport must preserve a paused cascade');
   assert.ok(Number((await metrics()).sandTime) > resizedFrameTime);
+  results.resizedPausePoster = await assertCurtainPoster(page);
+  await page.screenshot({ path: 'artifacts/curtain-poster-paused-fullscreen.png' });
   const resizedPreparations = (await metrics()).curtainPreparations;
   await activateCurtainControl(page);
   await page.waitForSelector('[data-curtain-state="playing"]');
@@ -763,8 +848,9 @@ try {
     const idlePage = await browser.newPage({ viewport: { width, height } });
     await idlePage.addInitScript(observeCurtainWorkers);
     await idlePage.goto(baseURL.href); await idlePage.waitForSelector('[data-sand-ready="true"]');
-    const idle = await assertIdleCurtain(idlePage), lettering = await logoLetterContainment(idlePage);
-    assert.ok(lettering.containment >= .99);
+    const idle = await assertIdleCurtain(idlePage), lettering = await logoContainment(idlePage);
+    assert.equal(lettering.containment, 1, 'The idle desktop poster must contain the full painted logo');
+    assert.ok(lettering.centerOffset < 12);
     await idlePage.screenshot({ path: `artifacts/curtain-play-idle-${name}.png` });
     results.idleViewports.push({ width, height, idle, lettering });
     await idlePage.close();

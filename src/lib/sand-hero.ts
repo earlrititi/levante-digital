@@ -12,7 +12,7 @@ declare global {
     setParticle: (index: number, position: number[], velocity: number[]) => void;
     step: (dt: number, cursor: GpuCursor) => void;
     reset: () => void;
-    redraw: () => void;
+    redraw: (forceCurtain?: boolean) => void;
     glow: (x: number, y: number) => ReturnType<GpuSand['glowForVerification']>;
     curtain: () => ReturnType<GpuSand['curtainForVerification']>;
     setCurtainParticle: (index: number, position: number[], velocity: number[]) => void;
@@ -31,10 +31,12 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   const playIcon = playButton?.querySelector<SVGElement>('[data-curtain-play-icon]');
   const pauseIcon = playButton?.querySelector<SVGElement>('[data-curtain-pause-icon]');
   if (!hero || !canvas || !emitter) return;
+  let engine: GpuSand | undefined;
   type CurtainState = 'idle' | 'loading' | 'playing' | 'paused' | 'unavailable';
   let curtainState: CurtainState = 'idle';
   function setCurtainState(state: CurtainState) {
     curtainState = state; hero!.dataset.curtainState = state;
+    engine?.setCurtainVisible(state === 'playing');
     if (!playButton) return;
     playButton.hidden = state === 'unavailable';
     playButton.disabled = state === 'loading' || state === 'unavailable';
@@ -64,7 +66,6 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   let renderer: Renderer | undefined;
   let SandEngine: typeof GpuSand | undefined;
   let SeedClient: typeof ParticleSeedClient | undefined;
-  let engine: GpuSand | undefined;
   let seedClient: ParticleSeedClient | undefined;
   let quality: ParticleQuality | undefined;
   let paused = false, disposed = false, imagesReady = false, curtainStarted = false, curtainPaused = false;
@@ -167,8 +168,9 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
       await target.attachCurtain(curtain, rect, seeds);
       if (!isCurrent()) return;
       target.setCurtainPaused(curtainPaused);
-      target.draw(cursor); hero!.dataset.curtainReady = 'true';
-      setCurtainState(paused || curtainPaused ? 'paused' : 'playing'); metrics(); updateStatus(); start();
+      hero!.dataset.curtainReady = 'true';
+      setCurtainState(paused || curtainPaused ? 'paused' : 'playing');
+      target.draw(cursor); metrics(); updateStatus(); start();
     } catch {
       if (!isCurrent()) return;
       hero!.dataset.curtainReady = 'false'; setCurtainState('idle'); metrics();
@@ -183,6 +185,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
       engine.setCurtainPaused(curtainPaused);
       if (!curtainPaused && paused) onToggle();
       setCurtainState(paused || curtainPaused ? 'paused' : 'playing');
+      engine.draw(cursor);
       metrics(); updateStatus(); start();
       return;
     }
@@ -216,7 +219,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
         setParticle: (index, position, velocity) => engine!.setParticleForVerification(index, position, velocity),
         step: (dt, collider) => { engine!.step(dt, collider); engine!.draw(collider); metrics(); },
         reset: () => { engine!.reset(); engine!.draw(cursor); metrics(); },
-        redraw: () => engine!.draw(cursor),
+        redraw: forceCurtain => engine!.draw(cursor, forceCurtain),
         glow: (x, y) => engine!.glowForVerification(x, y),
         curtain: () => engine!.curtainForVerification(),
         setCurtainParticle: (index, position, velocity) => engine!.setCurtainParticleForVerification(index, position, velocity),
@@ -257,6 +260,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     toggleButton!.textContent = paused ? 'Reanudar animación' : 'Pausar animación';
     if (paused) stop(); else start();
     if (engine?.curtainCount) setCurtainState(paused || curtainPaused ? 'paused' : 'playing');
+    engine?.draw(cursor);
     updateStatus();
   }
   function onReset() { cursor.active = false; engine?.reset(); engine?.draw(cursor); metrics(); }

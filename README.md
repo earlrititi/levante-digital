@@ -14,13 +14,13 @@ La verificación guarda capturas y lecturas GPU en `artifacts/`, que no se publi
 
 El hero combina `fondo-def.webp`, noise, las partículas de la cortina y del marco,
 y `logo-hero-vector.svg`. El logo permanece estático por encima de toda la animación.
-En escritorio su tamaño y el comienzo de «levante» se anclan al lienzo del fondo:
-las letras quedan dentro de la cascada también a pantalla completa y el símbolo
-se mantiene a su izquierda. En móvil se centra y reduce para
+En escritorio el símbolo y las letras se centran dentro del cuerpo de la cortina,
+con un tamaño anclado al lienzo del fondo para conservar la composición también
+a pantalla completa. En móvil se centra y reduce para
 mantener la marca completa dentro de la pantalla.
 Fondo y cortina comparten el lienzo original de 1672 × 941: ambos reciben el mismo
 escalado `cover`, centrado horizontal y verticalmente, para preservar su composición
-en escritorio y móvil. La imagen plana de la cortina se muestra antes de play
+en escritorio y móvil. La imagen plana de la cortina se muestra antes de play, al pausar
 y como fallback si la animación no está disponible.
 
 El marco se anima al cargar. La cascada se inicia exclusivamente al pulsar
@@ -30,7 +30,9 @@ crean sus buffers o shaders GPU. Play añade la cascada al motor existente sin
 reiniciar el marco. Pausa y reinicio no activan una cascada que aún está estática.
 El botón circular de la esquina inferior izquierda muestra solo un icono y
 permanece visible: play inicia o
-reanuda la cascada y pausa la congela sin detener el marco. Reanudar conserva
+reanuda la cascada y pausa muestra la imagen original sin detener el marco.
+La capa de partículas de la cortina se limpia y oculta mientras está pausada.
+Reanudar conserva
 sus posiciones y velocidades, sin volver a crear semillas ni buffers.
 
 La cortina se reconstruye con 65.536 partículas en escritorio y 16.384 en móvil.

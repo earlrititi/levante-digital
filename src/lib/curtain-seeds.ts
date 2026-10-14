@@ -22,7 +22,8 @@ function randomFor(index: number, salt: number): number {
 
 /** Initialise GPU textures once; the animation never needs to scan source pixels. */
 export function buildCurtainSeeds(pixels: Uint8ClampedArray, imageWidth: number,
-  imageHeight: number, rect: FrameRect, count: number): CurtainSeeds {
+  imageHeight: number, rect: FrameRect, count: number,
+  viewport?: { width: number; height: number }): CurtainSeeds {
   if (!Number.isSafeInteger(imageWidth) || !Number.isSafeInteger(imageHeight)
     || imageWidth < 1 || imageHeight < 1 || pixels.length < imageWidth * imageHeight * 4) {
     throw new Error('Curtain image dimensions do not match its pixels');
@@ -31,10 +32,20 @@ export function buildCurtainSeeds(pixels: Uint8ClampedArray, imageWidth: number,
   if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
     || rect.width <= 0 || rect.height <= 0) throw new Error('Curtain rectangle must have positive finite dimensions');
 
-  const pixelCount = imageWidth * imageHeight;
+  if (viewport && (![viewport.width, viewport.height].every(Number.isFinite)
+    || viewport.width <= 0 || viewport.height <= 0)) throw new Error('Curtain viewport must have positive finite dimensions');
+  // Cover crops most of the artwork on phones. Never allocate or scan those
+  // invisible columns; a clipped stream still uses the artwork's native colors.
+  const startX = viewport ? Math.max(0, Math.ceil(-rect.x / rect.width * imageWidth)) : 0;
+  const endX = viewport ? Math.min(imageWidth, Math.floor((viewport.width - rect.x) / rect.width * imageWidth)) : imageWidth;
+  const startY = viewport ? Math.max(0, Math.ceil(-rect.y / rect.height * imageHeight)) : 0;
+  const endY = viewport ? Math.min(imageHeight, Math.floor((viewport.height - rect.y) / rect.height * imageHeight)) : imageHeight;
+  const columns = Math.max(0, endX - startX), rows = Math.max(0, endY - startY);
+  const pixelCount = columns * rows;
   const opaque = new Uint32Array(pixelCount);
   let visibleCount = 0;
-  for (let cell = 0; cell < pixelCount; cell++) {
+  for (let y = startY; y < endY; y++) for (let x = startX; x < endX; x++) {
+    const cell = y * imageWidth + x;
     if (pixels[cell * 4 + 3]! >= 128) opaque[visibleCount++] = cell;
   }
   if (!visibleCount) throw new Error('Curtain has no visible pixels');
@@ -43,14 +54,14 @@ export function buildCurtainSeeds(pixels: Uint8ClampedArray, imageWidth: number,
   // linear in image size, including the assignment of boundaries to visible cells.
   const segmentTop = new Uint32Array(pixelCount);
   const segmentBottom = new Uint32Array(pixelCount);
-  for (let x = 0; x < imageWidth; x++) {
-    let y = 0;
-    while (y < imageHeight) {
+  for (let x = startX; x < endX; x++) {
+    let y = startY;
+    while (y < endY) {
       if (pixels[(y * imageWidth + x) * 4 + 3]! < 128) { y++; continue; }
       const top = y;
-      do { y++; } while (y < imageHeight && pixels[(y * imageWidth + x) * 4 + 3]! >= 128);
+      do { y++; } while (y < endY && pixels[(y * imageWidth + x) * 4 + 3]! >= 128);
       for (let row = top; row < y; row++) {
-        const cell = row * imageWidth + x;
+        const cell = (row - startY) * columns + x - startX;
         segmentTop[cell] = top;
         segmentBottom[cell] = y;
       }
@@ -73,6 +84,7 @@ export function buildCurtainSeeds(pixels: Uint8ClampedArray, imageWidth: number,
     const start = Math.floor(index * visibleCount / count);
     const end = Math.floor((index + 1) * visibleCount / count);
     const cell = opaque[start + Math.floor(randomFor(index, 0x1234abcd) * Math.max(1, end - start))]!;
+    const localCell = (Math.floor(cell / imageWidth) - startY) * columns + cell % imageWidth - startX;
     const pixel = cell * 4, offset = index * 4;
     const pixelX = cell % imageWidth + .15 + randomFor(index, 0xdeadbeef) * .7;
     const pixelY = Math.floor(cell / imageWidth) + .15 + randomFor(index, 0x456789ab) * .7;
@@ -84,8 +96,8 @@ export function buildCurtainSeeds(pixels: Uint8ClampedArray, imageWidth: number,
     sources.set([x, y, seed, .8 + randomFor(index, 0x2468ace0) * .6], offset);
     colors.set(pixels.subarray(pixel, pixel + 4), offset);
     flows.set([
-      rect.y + segmentTop[cell]! / imageHeight * rect.height,
-      rect.y + segmentBottom[cell]! / imageHeight * rect.height,
+      rect.y + segmentTop[localCell]! / imageHeight * rect.height,
+      rect.y + segmentBottom[localCell]! / imageHeight * rect.height,
       x, 1,
     ], offset);
     indices[index * 2] = (index % textureWidth + .5) / textureWidth;

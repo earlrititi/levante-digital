@@ -102,3 +102,23 @@ test('empty or malformed curtain inputs fail so the static fallback can remain v
   assert.throws(() => buildCurtainSeeds(fixture(), 3, 5, rect, 1.5), /positive integer/);
   assert.throws(() => buildCurtainSeeds(fixture(), 3, 5, { ...rect, width: 0 }, 8), /positive finite/);
 });
+
+test('cover crops reserve every grain for the visible viewport and preserve native colors', () => {
+  const pixels = new Uint8ClampedArray(12 * 10 * 4);
+  for (let y = 0; y < 10; y++) for (let x = 0; x < 12; x++) {
+    pixels.set([x * 10, y * 10, 50, 255], (y * 12 + x) * 4);
+  }
+  const cropped = { x: -40, y: -20, width: 120, height: 100 };
+  const result = buildCurtainSeeds(pixels, 12, 10, cropped, 128, { width: 40, height: 50 });
+  for (let i = 0; i < result.count; i++) {
+    const offset = i * 4, x = result.sources[offset]!, y = result.sources[offset + 1]!;
+    assert.ok(x >= 0 && x < 40 && y >= 0 && y < 50);
+    assert.equal(result.flows[offset], 0);
+    assert.equal(result.flows[offset + 1], 50);
+    const nativeX = Math.floor((x - cropped.x) / cropped.width * 12);
+    const nativeY = Math.floor((y - cropped.y) / cropped.height * 10);
+    assert.deepEqual([...result.colors.slice(offset, offset + 4)],
+      [...pixels.slice((nativeY * 12 + nativeX) * 4, (nativeY * 12 + nativeX) * 4 + 4)]);
+  }
+  assert.throws(() => buildCurtainSeeds(pixels, 12, 10, { ...cropped, x: 200 }, 8, { width: 40, height: 50 }), /no visible pixels/);
+});

@@ -4,6 +4,8 @@ import { PARTICLE_FRAGMENT, PARTICLE_VERTEX, QUAD_VERTEX, SIMULATION_FRAGMENT,
   SPARK_SIMULATION_FRAGMENT, SPARK_VERTEX } from './sand-shaders';
 import { ParticleGlow } from './particle-glow';
 import { GpuCurtain } from './gpu-curtain';
+import { getParticleQuality, type ParticleQuality } from './particle-quality';
+import type { CurtainSeeds } from './curtain-seeds';
 
 export type GpuCursor = { x: number; y: number; previousX: number; previousY: number; radius: number; active: boolean };
 export type GpuSnapshot = { positions: Float32Array; velocities: Float32Array; impacts: Float32Array; count: number;
@@ -50,18 +52,20 @@ export class GpuSand {
   private geometries: Geometry[] = [];
   private programs: Program[] = [];
   private disposed = false;
+  private sparksActiveUntil = 0;
 
   constructor(private renderer: Renderer, image: HTMLImageElement, rect: FrameRect,
-    private width: number, private height: number) {
+    private width: number, private height: number,
+    private quality: ParticleQuality = getParticleQuality(width, height), prepared?: ParticleSeeds) {
     this.gl = renderer.gl as WebGL2RenderingContext;
     const gl = this.gl;
     if (!renderer.isWebgl2 || !gl.getExtension('EXT_color_buffer_float') ||
       gl.getParameter(gl.MAX_DRAW_BUFFERS) < 3 || gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) < 5) {
       throw new Error('Floating-point WebGL2 simulation is not supported');
     }
-    this.count = width < 600 ? 8192 : 32768;
-    this.sparkCount = this.count / 2;
-    try { this.initialise(image, rect); }
+    this.count = quality.frameCount;
+    this.sparkCount = quality.sparkCount;
+    try { this.initialise(image, rect, prepared); }
     catch (error) { this.dispose(); throw error; }
   }
 
@@ -98,8 +102,11 @@ export class GpuSand {
     return target;
   }
 
-  private initialise(image: HTMLImageElement, rect: FrameRect) {
+  private initialise(image: HTMLImageElement, rect: FrameRect, prepared?: ParticleSeeds) {
     const gl = this.gl;
+    if (prepared) {
+      this.seeds = prepared;
+    } else {
     const sample = document.createElement('canvas');
     sample.width = image.naturalWidth; sample.height = image.naturalHeight;
     const context = sample.getContext('2d', { willReadFrequently: true });
@@ -107,6 +114,7 @@ export class GpuSand {
     context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
     this.seeds = buildParticleSeeds(pixels, sample.width, sample.height, rect, this.count);
+    }
     this.sparkSeeds = buildSparkSeeds(this.seeds);
     this.initialImpacts = new Float32Array(this.seeds.positions.length);
     for (let i = 2; i < this.initialImpacts.length; i += 4) this.initialImpacts[i] = -1;
@@ -141,7 +149,7 @@ export class GpuSand {
     this.positionUniform = { value: this.read.textures[0]! };
     this.velocityUniform = { value: this.read.textures[1]! };
     this.impactUniform = { value: this.read.textures[2]! };
-    this.glow = new ParticleGlow(this.renderer, quad, this.width, this.height);
+    this.glow = new ParticleGlow(this.renderer, quad, this.width, this.height, this.quality);
     const pointProgram = this.makeProgram({
       vertex: PARTICLE_VERTEX, fragment: PARTICLE_FRAGMENT, transparent: true,
       depthTest: false, depthWrite: false, cullFace: false,
@@ -175,14 +183,15 @@ export class GpuSand {
 
   get curtainCount() { return this.curtain?.count ?? 0; }
 
-  attachCurtain(image: HTMLImageElement, rect: FrameRect) {
+  attachCurtain(image: HTMLImageElement, rect: FrameRect, prepared?: CurtainSeeds) {
     this.curtain?.dispose(); this.curtain = undefined;
-    this.curtain = new GpuCurtain(this.renderer, image, rect, this.width, this.height);
+    this.curtain = new GpuCurtain(this.renderer, image, rect, this.width, this.height, this.quality, prepared);
   }
 
   reset() {
     if (this.disposed) return;
     this.time = 0; this.steps = 0;
+    this.sparksActiveUntil = 0;
     this.timeUniform.value = 0;
     this.curtain?.reset();
     for (const target of this.targets) {
@@ -204,16 +213,20 @@ export class GpuSand {
     this.computePosition.value = this.read.textures[0]!;
     this.computeVelocity.value = this.read.textures[1]!;
     this.computeImpact.value = this.read.textures[2]!;
-    this.cursorUniform.value.set([cursor.x, cursor.y, cursor.radius, cursor.active ? 1 : 0]);
-    this.previousCursor.value.set([cursor.previousX, cursor.previousY]);
+    this.cursorUniform.value[0] = cursor.x; this.cursorUniform.value[1] = cursor.y;
+    this.cursorUniform.value[2] = cursor.radius; this.cursorUniform.value[3] = cursor.active ? 1 : 0;
+    this.previousCursor.value[0] = cursor.previousX; this.previousCursor.value[1] = cursor.previousY;
     this.deltaUniform.value = dt; this.timeUniform.value = this.time;
     this.renderer.render({ scene: this.compute, target: this.write, clear: false, sort: false, frustumCull: false });
     const previous = this.read; this.read = this.write; this.write = previous;
     this.impactUniform.value = this.read.textures[2]!;
     this.sparkPosition.value = this.sparkRead.textures[0]!;
     this.sparkVelocity.value = this.sparkRead.textures[1]!;
-    this.renderer.render({ scene: this.sparkCompute, target: this.sparkWrite, clear: false, sort: false, frustumCull: false });
-    const previousSpark = this.sparkRead; this.sparkRead = this.sparkWrite; this.sparkWrite = previousSpark;
+    if (cursor.active) this.sparksActiveUntil = this.time + 2;
+    if (this.time < this.sparksActiveUntil) {
+      this.renderer.render({ scene: this.sparkCompute, target: this.sparkWrite, clear: false, sort: false, frustumCull: false });
+      const previousSpark = this.sparkRead; this.sparkRead = this.sparkWrite; this.sparkWrite = previousSpark;
+    }
     this.curtain?.step(dt, cursor);
   }
 
@@ -224,10 +237,13 @@ export class GpuSand {
     this.impactUniform.value = this.read.textures[2]!;
     this.sparkPosition.value = this.sparkRead.textures[0]!;
     this.sparkVelocity.value = this.sparkRead.textures[1]!;
-    this.cursorUniform.value.set([cursor.x, cursor.y, cursor.radius, cursor.active ? 1 : 0]);
+    this.cursorUniform.value[0] = cursor.x; this.cursorUniform.value[1] = cursor.y;
+    this.cursorUniform.value[2] = cursor.radius; this.cursorUniform.value[3] = cursor.active ? 1 : 0;
     this.curtain?.drawParticles(this.glow!.particles, this.glow!.pixelRatio);
     this.renderer.render({ scene: this.particles, target: this.glow!.particles, clear: !this.curtain, sort: false, frustumCull: false });
-    this.renderer.render({ scene: this.sparks, target: this.glow!.particles, clear: false, sort: false, frustumCull: false });
+    if (this.time < this.sparksActiveUntil) {
+      this.renderer.render({ scene: this.sparks, target: this.glow!.particles, clear: false, sort: false, frustumCull: false });
+    }
     this.glow!.draw();
   }
 
@@ -285,7 +301,9 @@ export class GpuSand {
     this.glow?.dispose();
     this.curtain?.dispose();
     for (const geometry of this.geometries) geometry.remove();
-    for (const program of this.programs) program.remove();
+    for (const program of this.programs) {
+      program.remove(); this.gl.deleteShader(program.vertexShader); this.gl.deleteShader(program.fragmentShader);
+    }
     for (const texture of this.textures) this.gl.deleteTexture(texture.texture);
     for (const target of [...this.targets, ...this.sparkTargets]) {
       for (const texture of target.textures) this.gl.deleteTexture(texture.texture);

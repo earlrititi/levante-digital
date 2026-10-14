@@ -1,8 +1,9 @@
 import { Mesh, Program, RenderTarget, Renderer, type Geometry, type Texture } from 'ogl';
 import { QUAD_VERTEX } from './sand-shaders';
+import { getParticleQuality, type ParticleQuality } from './particle-quality';
 
 // The example's bloom settings, applied to the transparent particle layer.
-const BLOOM_SCALE = .5, BLOOM_THRESHOLD = .01, BLOOM_WEIGHT = 2, CONTRAST = 2;
+const BLOOM_THRESHOLD = .01, BLOOM_WEIGHT = 2, CONTRAST = 2;
 
 const BLUR_FRAGMENT = `#version 300 es
 precision highp float;
@@ -59,13 +60,14 @@ export class ParticleGlow {
   private targets: RenderTarget[] = [];
   private programs: Program[] = [];
 
-  constructor(private renderer: Renderer, quad: Geometry, width: number, height: number) {
+  constructor(private renderer: Renderer, quad: Geometry, width: number, height: number,
+    quality: ParticleQuality = getParticleQuality(width, height)) {
     // Bound pixel cost on high-DPI displays while retaining soft, antialiased sprites.
-    this.pixelRatio = Math.min(renderer.dpr, 1.5, 1920 / width, 1200 / height);
+    this.pixelRatio = Math.min(renderer.dpr, quality.pixelRatio);
     const w = Math.max(1, Math.round(width * this.pixelRatio)), h = Math.max(1, Math.round(height * this.pixelRatio));
     try {
       this.particles = this.target(w, h);
-      this.horizontal = this.target(Math.max(1, Math.round(w * BLOOM_SCALE)), Math.max(1, Math.round(h * BLOOM_SCALE)));
+      this.horizontal = this.target(Math.max(1, Math.round(w * quality.bloomScale)), Math.max(1, Math.round(h * quality.bloomScale)));
       this.vertical = this.target(this.horizontal.width, this.horizontal.height);
       this.input = { value: this.particles.texture };
       const blur = this.program({ vertex: QUAD_VERTEX, fragment: BLUR_FRAGMENT,
@@ -127,7 +129,9 @@ export class ParticleGlow {
   dispose() {
     if (this.renderer.gl.isContextLost()) return;
     this.renderer.bindFramebuffer();
-    for (const program of this.programs) program.remove();
+    for (const program of this.programs) {
+      program.remove(); this.renderer.gl.deleteShader(program.vertexShader); this.renderer.gl.deleteShader(program.fragmentShader);
+    }
     for (const target of this.targets) {
       for (const texture of target.textures) this.renderer.gl.deleteTexture(texture.texture);
       this.renderer.gl.deleteFramebuffer(target.buffer);

@@ -4,6 +4,7 @@ import type { FrameRect } from './sand-seeds';
 import type { GpuCursor } from './gpu-sand';
 import { CURTAIN_SIMULATION, CURTAIN_PARTICLE_VERTEX } from './curtain-particle-shaders';
 import { PARTICLE_FRAGMENT, QUAD_VERTEX } from './sand-shaders';
+import { getParticleQuality, type ParticleQuality } from './particle-quality';
 
 /** Colored waterfall grains own their positions and velocities in float GPU textures. */
 export class GpuCurtain {
@@ -30,10 +31,11 @@ export class GpuCurtain {
   private disposed = false;
 
   constructor(private renderer: Renderer, image: HTMLImageElement, private rect: FrameRect,
-    private width: number, private height: number) {
-    this.count = width < 600 ? 32768 : 131072;
+    private width: number, private height: number,
+    private quality: ParticleQuality = getParticleQuality(width, height), prepared?: CurtainSeeds) {
+    this.count = quality.curtainCount;
     this.imageWidth = image.naturalWidth; this.imageHeight = image.naturalHeight;
-    try { this.initialise(image); this.reset(); } catch (error) { this.dispose(); throw error; }
+    try { this.initialise(image, prepared); this.reset(); } catch (error) { this.dispose(); throw error; }
   }
 
   private program(options: ConstructorParameters<typeof Program>[1]) {
@@ -54,14 +56,18 @@ export class GpuCurtain {
     this.textures.push(texture); return texture;
   }
 
-  private initialise(image: HTMLImageElement) {
+  private initialise(image: HTMLImageElement, prepared?: CurtainSeeds) {
     const gl = this.renderer.gl as WebGL2RenderingContext;
+    if (prepared) {
+      this.seeds = prepared;
+    } else {
     const sample = document.createElement('canvas'); sample.width = this.imageWidth; sample.height = this.imageHeight;
     const context = sample.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('Unable to decode waterfall artwork');
     context.drawImage(image, 0, 0);
     this.seeds = buildCurtainSeeds(context.getImageData(0, 0, sample.width, sample.height).data,
-      sample.width, sample.height, this.rect, this.count);
+      sample.width, sample.height, this.rect, this.count, { width: this.width, height: this.height });
+    }
     const sources = this.texture(this.seeds.sources, true), flows = this.texture(this.seeds.flows, true);
     const colors = this.texture(this.seeds.colors, false);
     const artwork = new Texture(this.renderer.gl, { image, generateMipmaps: false, minFilter: gl.NEAREST, magFilter: gl.NEAREST });
@@ -89,7 +95,7 @@ export class GpuCurtain {
       transparent: true, depthTest: false, depthWrite: false, cullFace: false,
       uniforms: { uPositions: this.position, uVelocities: this.velocity, uSources: { value: sources }, uColors: { value: colors },
         uArtwork: { value: artwork }, uViewport: viewport, uDpr: this.dpr, uTime: this.time,
-        uDiameterScale: { value: this.width < 600 ? 4.5 : 3.6 },
+        uDiameterScale: { value: this.quality.curtainDiameter },
         uRect: rect } });
     // Preserve the source hues when grains overlap instead of adding them to white.
     program.setBlendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -108,8 +114,9 @@ export class GpuCurtain {
   step(dt: number, cursor: GpuCursor) {
     if (this.disposed || this.renderer.gl.isContextLost()) return;
     this.time.value += dt; this.dt.value = dt;
-    this.cursor.value.set([cursor.x, cursor.y, cursor.radius, cursor.active ? 1 : 0]);
-    this.previousCursor.value.set([cursor.previousX, cursor.previousY]);
+    this.cursor.value[0] = cursor.x; this.cursor.value[1] = cursor.y;
+    this.cursor.value[2] = cursor.radius; this.cursor.value[3] = cursor.active ? 1 : 0;
+    this.previousCursor.value[0] = cursor.previousX; this.previousCursor.value[1] = cursor.previousY;
     this.position.value = this.read.textures[0]!; this.velocity.value = this.read.textures[1]!;
     this.renderer.render({ scene: this.compute, target: this.write, clear: false, sort: false, frustumCull: false });
     const previous = this.read; this.read = this.write; this.write = previous;

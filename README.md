@@ -14,11 +14,16 @@ La verificación guarda capturas y lecturas GPU en `artifacts/`, que no se publi
 
 El hero combina `fondo-def.webp`, noise, las partículas de la cortina y del marco,
 y `logo-hero-vector.svg`. El logo permanece estático por encima de toda la animación.
+En escritorio su tamaño y el comienzo de «levante» se anclan al lienzo del fondo:
+el símbolo queda a la izquierda de la cascada. En móvil se centra y reduce para
+mantener la marca completa dentro de la pantalla.
 Fondo y cortina comparten el lienzo original de 1672 × 941: ambos reciben el mismo
 escalado `cover`, centrado horizontal y verticalmente, para preservar su composición
 en escritorio y móvil. La imagen plana de la cortina solo se muestra como fallback.
 
-La cortina se reconstruye con 131.072 partículas en escritorio y 32.768 en móvil.
+La cortina se reconstruye con 65.536 partículas en escritorio y 16.384 en móvil.
+Solo se preparan columnas y tramos visibles después del recorte `cover`, para
+evitar simular la mayor parte del lienzo que queda fuera de pantalla en móvil.
 Los emisores se obtienen de píxeles con alfa de al menos 128; conservan el RGBA
 original, sin sustituirlo por una paleta aleatoria. Cada columna se divide en sus
 tramos opacos: los huecos transparentes interrumpen el flujo. Las partículas
@@ -33,9 +38,9 @@ color al desprenderse. Vuelven a su origen al salir del hero o tras 3,2 segundos
 
 El marco usa únicamente el alfa de `marco.webp`, convertido sin pérdida desde
 `marco.svg`: 1774 × 942, con un borde de 10 píxeles. Nunca se dibuja como imagen.
-Sus 32.768 granos de escritorio, o 8.192 en móvil, circulan por carriles dentro
+Sus 16.384 granos de escritorio, o 4.096 en móvil, circulan por carriles dentro
 del grosor original a 48–80 px/s. Solo caen tras tocar el cursor. Los contactos
-también emiten hasta 16.384 destellos en escritorio o 4.096 en móvil, con
+también emiten hasta 8.192 destellos en escritorio o 2.048 en móvil, con
 vida de 0,45–1,65 segundos. Se conserva la referencia de
 [Chris Wellons, A GPU Approach to Particle Physics](https://nullprogram.com/blog/2014/06/29/)
 y [skeeto/webgl-particles](https://github.com/skeeto/webgl-particles), publicada
@@ -52,12 +57,20 @@ se muestra la composición estática con `cortina-def.webp` y el mismo logo.
 
 La GPU mantiene posiciones y velocidades en texturas RGBA32F alternadas.
 Los shaders de vértices leen esas texturas directamente para dibujar los granos.
-La CPU prepara máscaras, tramos y buffers al cargar o cambiar de tamaño;
+Un Web Worker prepara máscaras, tramos y buffers al cargar o cambiar de tamaño;
+los envía a la GPU con buffers transferibles y conserva los píxeles decodificados
+para los siguientes tamaños. Si faltan Worker u OffscreenCanvas, se usa el mismo
+muestreo en el hilo principal. El motor WebGL se carga después de la primera
+pintura; la imagen estática y el logo permiten ver el hero mientras se prepara.
 no recorre partículas ni lee datos GPU en cada fotograma. `gpu-sand.ts` coordina
 el marco, la cortina y el glow; `gpu-curtain.ts` implementa la cascada;
 `curtain-seeds.ts` construye sus emisores y tramos a partir del alfa original.
 El bloom procesa la capa de partículas en HDR RGBA16F, con umbral 0,01,
-escala 0,5, peso 2 y contraste 2. Su resolución se limita a 1920 × 1200.
+escala 0,5 en escritorio o 0,35 en móvil, peso 2 y contraste 2. Su resolución
+se limita a 1600 × 1000 y a un píxel de render por píxel CSS; el SVG del logo
+conserva su resolución vectorial. Los destellos se calculan y dibujan solo
+durante la interacción y hasta que termina su vida. Los dispositivos con
+2 GB de RAM o 2 núcleos, o ahorro de datos, reciben la mitad del presupuesto.
 Estas cantidades no garantizan FPS: el rendimiento depende del dispositivo.
 
 Los tests de navegador verifican fuentes y colores, alineación del fondo,

@@ -16,6 +16,26 @@ page.on('console', message => {
 });
 page.on('requestfailed', request => failedRequests.push(request.url()));
 const metrics = () => page.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+function assertParticleBudget(metadata, width) {
+  const mobile = width < 600, economy = metadata.sandQuality === 'economy';
+  assert.ok(['desktop', 'mobile', 'economy'].includes(metadata.sandQuality));
+  if (!economy) assert.equal(metadata.sandQuality, mobile ? 'mobile' : 'desktop');
+  const divisor = economy ? 2 : 1, frame = (mobile ? 4096 : 16384) / divisor;
+  assert.equal(Number(metadata.sandParticles), frame, 'The frame must use the bounded shared device budget');
+  assert.equal(Number(metadata.sandSparks), frame / 2);
+  assert.equal(Number(metadata.curtainParticles), (mobile ? 16384 : 65536) / divisor);
+}
+function curtainViewportCoverage() {
+  const state = window.__sandGpu.curtain(), hero = document.querySelector('[data-sand-hero]');
+  let offscreenSources = 0, offscreenFlows = 0;
+  for (let index = 0; index < state.count; index++) {
+    const i = index * 4, x = state.sources[i], y = state.sources[i + 1];
+    if (x < 0 || x >= hero.clientWidth || y < 0 || y >= hero.clientHeight) offscreenSources++;
+    if (state.flows[i] < -.001 || state.flows[i + 1] > hero.clientHeight + .001
+      || state.flows[i + 2] < 0 || state.flows[i + 2] >= hero.clientWidth) offscreenFlows++;
+  }
+  return { count: state.count, offscreenSources, offscreenFlows };
+}
 const stateSummary = () => page.evaluate(() => {
   const state = window.__sandGpu.snapshot();
   let contacts = 0, falling = 0, activeSparks = 0, finite = true;
@@ -36,8 +56,9 @@ try {
   await page.waitForTimeout(300);
   results.initial = await metrics();
   assert.equal(results.initial.sandEngine, 'gpu');
-  assert.equal(Number(results.initial.sandParticles), 32768);
-  assert.equal(Number(results.initial.sandSparks), 16384);
+  assertParticleBudget(results.initial, 1440);
+  assert.ok(['worker', 'main-thread'].includes(results.initial.sandSeedPreparation));
+  assert.ok(Number(results.initial.sandInitMs) > 0);
   assert.equal(results.initial.sandStyle, 'luminous');
   assert.equal(Number(results.initial.sandSpeed), .8);
   assert.equal(Number(results.initial.sandCursorRadius), 10);
@@ -46,7 +67,6 @@ try {
   assert.equal(results.initial.logoParticles, undefined);
   assert.equal(results.initial.curtainReady, 'true');
   assert.equal(results.initial.curtainEffect, 'particle-waterfall');
-  assert.equal(Number(results.initial.curtainParticles), 131072);
   assert.equal(Number(results.initial.curtainGravity), 981);
   assert.equal(results.initial.curtainPoints, undefined);
   assert.equal(results.initial.curtainLines, undefined);
@@ -130,6 +150,9 @@ try {
   assert.equal(results.curtainSourceMask.mismatchedColors, 0, 'Emitter RGBA must reproduce the supplied artwork, including alpha');
   assert.equal(results.curtainSourceMask.invalidFlows, 0, 'Each opaque vertical segment must have an independent waterfall channel');
   assert.ok(results.curtainSourceMask.distinctColors > 100, 'The curtain must retain its original shading');
+  results.initialCurtainCoverage = await page.evaluate(curtainViewportCoverage);
+  assert.equal(results.initialCurtainCoverage.offscreenSources, 0, 'Only visible curtain pixels may consume the particle budget');
+  assert.equal(results.initialCurtainCoverage.offscreenFlows, 0, 'Waterfall streams must wrap within the visible crop');
   results.sourceMask = await page.evaluate(async () => {
     const sources = window.__sandGpu.sources();
     const emitter = document.querySelector('[data-sand-frame]'), hero = document.querySelector('[data-sand-hero]');
@@ -522,10 +545,9 @@ try {
     await page.waitForTimeout(350);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal((await metrics()).sandReady, 'true');
-    assert.equal(Number((await metrics()).sandParticles), width < 600 ? 8192 : 32768);
+    assertParticleBudget(await metrics(), width);
     assert.equal((await metrics()).curtainReady, 'true');
     assert.equal((await metrics()).curtainEffect, 'particle-waterfall');
-    assert.equal(Number((await metrics()).curtainParticles), width < 600 ? 32768 : 131072);
     assert.equal(Number((await metrics()).curtainGravity), 981);
     const alignment = await page.evaluate(() => {
       const hero = document.querySelector('[data-sand-hero]'), state = window.__sandGpu.curtain();
@@ -535,8 +557,11 @@ try {
       return Math.max(...Object.keys(expected).map(key => Math.abs(state.rect[key] - expected[key])));
     });
     assert.ok(alignment < .01, 'Resize must keep the particle curtain aligned with its background');
+    const coverage = await page.evaluate(curtainViewportCoverage);
+    assert.equal(coverage.offscreenSources, 0, 'All curtain emitters must remain on screen after resize, including the mobile cover crop');
+    assert.equal(coverage.offscreenFlows, 0);
     assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
-    results.viewports.push({ width, ...await metrics(), ...await stateSummary() });
+    results.viewports.push({ width, ...await metrics(), ...await stateSummary(), curtainCoverage: coverage });
     if (width === 375) await page.screenshot({ path: 'artifacts/hero-gpu-mobile.png' });
   }
   const touchPage = await browser.newPage({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
@@ -573,6 +598,79 @@ try {
   });
   assert.ok(results.curtainTouchTap > 0, 'A touch must disturb the real waterfall particles');
   await touchPage.close();
+
+  const workerFallbackPage = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const workerFallbackErrors = [];
+  workerFallbackPage.on('pageerror', error => workerFallbackErrors.push(error.message));
+  await workerFallbackPage.addInitScript(() => {
+    window.Worker = class {
+      constructor() { throw new DOMException('Worker blocked by verification fixture', 'SecurityError'); }
+    };
+  });
+  await workerFallbackPage.goto(baseURL.href);
+  await workerFallbackPage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  results.workerFailureFallback = await workerFallbackPage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(results.workerFailureFallback.sandSeedPreparation, 'main-thread', 'A blocked Worker must initialize from the same pixels on the main thread');
+  assertParticleBudget(results.workerFailureFallback, 390);
+  assert.deepEqual(workerFallbackErrors, []);
+  assert.equal(await workerFallbackPage.locator('[data-logo-image]').isVisible(), true);
+  await workerFallbackPage.close();
+
+  const economyPage = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const economyErrors = [];
+  economyPage.on('pageerror', error => economyErrors.push(error.message));
+  await economyPage.addInitScript(() => {
+    Object.defineProperty(navigator, 'hardwareConcurrency', { configurable: true, get: () => 2 });
+    Object.defineProperty(navigator, 'deviceMemory', { configurable: true, get: () => 2 });
+  });
+  await economyPage.goto(baseURL.href);
+  await economyPage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  results.economyDevice = await economyPage.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(results.economyDevice.sandQuality, 'economy');
+  assertParticleBudget(results.economyDevice, 390);
+  results.economyCurtainCoverage = await economyPage.evaluate(curtainViewportCoverage);
+  assert.equal(results.economyCurtainCoverage.offscreenSources, 0);
+  assert.equal(results.economyCurtainCoverage.offscreenFlows, 0);
+  assert.deepEqual(economyErrors, []);
+  await economyPage.close();
+
+  const racePage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const raceErrors = [];
+  racePage.on('pageerror', error => raceErrors.push(error.message));
+  await racePage.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    window.__seedWorkerJobs = 0;
+    window.Worker = class extends NativeWorker {
+      postMessage(...args) { window.__seedWorkerJobs++; return super.postMessage(...args); }
+      set onmessage(callback) {
+        super.onmessage = callback ? event => setTimeout(() => callback.call(this, event), 180) : null;
+      }
+      get onmessage() { return super.onmessage; }
+    };
+  });
+  await racePage.goto(baseURL.href, { waitUntil: 'domcontentloaded' });
+  await racePage.waitForFunction(() => window.__seedWorkerJobs > 0);
+  for (const width of [768, 390, 1024, 390]) await racePage.setViewportSize({ width, height: 844 });
+  await racePage.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
+  await racePage.waitForTimeout(450);
+  results.resizeDuringStartup = await racePage.evaluate(() => {
+    const hero = document.querySelector('[data-sand-hero]'), canvas = document.querySelector('[data-sand-canvas]');
+    return { ...hero.dataset, width: hero.clientWidth, height: hero.clientHeight,
+      canvasWidth: canvas.width, canvasHeight: canvas.height, workerJobs: window.__seedWorkerJobs };
+  });
+  assert.equal(results.resizeDuringStartup.width, 390);
+  assert.equal(results.resizeDuringStartup.height, 844);
+  assertParticleBudget(results.resizeDuringStartup, 390);
+  assert.equal(results.resizeDuringStartup.sandSeedPreparation, 'worker');
+  assert.equal(results.resizeDuringStartup.canvasWidth, 390, 'A stale desktop worker result must never replace the final mobile layout');
+  assert.equal(results.resizeDuringStartup.canvasHeight, 844);
+  assert.ok(results.resizeDuringStartup.workerJobs >= 2, 'Resize while initialization is pending must prepare a new generation');
+  results.resizeDuringStartup.curtainCoverage = await racePage.evaluate(curtainViewportCoverage);
+  assert.equal(results.resizeDuringStartup.curtainCoverage.offscreenSources, 0);
+  assert.equal(results.resizeDuringStartup.curtainCoverage.offscreenFlows, 0);
+  assert.deepEqual(raceErrors, []);
+  await racePage.close();
+
   await page.emulateMedia({ reducedMotion: 'reduce' }); await page.reload();
   await page.waitForFunction(() => document.querySelector('[data-sand-status]').textContent.includes('movimiento reducido'));
   assert.equal(await page.locator('[data-sand-toggle]').isDisabled(), true);

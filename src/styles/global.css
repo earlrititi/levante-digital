@@ -28,6 +28,10 @@ button { font: inherit; }
 .prototype button:hover { background: #e7dbcb; }
 .prototype button:disabled { cursor: default; opacity: .5; }
 .prototype__status { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #705a48; }
-@media (max-width: 899px) { .hero__logo { left: 50%; width: 70%; transform: translate(-50%, -54.3%); } }
+@media (max-width: 899px) {
+  .hero { --scene-pixel: max(calc(100cqw / 1598), calc(100cqh / 941)); }
+  .hero__background, .hero__curtain-static { inset: auto; left: calc(50% - 873 * var(--scene-pixel)); top: calc(50% - 470.5 * var(--scene-pixel)); width: calc(1672 * var(--scene-pixel)); height: calc(941 * var(--scene-pixel)); }
+  .hero__logo { left: 50%; width: min(70%, calc(640 * var(--scene-pixel))); transform: translate(-54.0833%, -54.3%); }
+}
 @media (max-width: 600px) { .prototype { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .hero__sand { display: none; } }

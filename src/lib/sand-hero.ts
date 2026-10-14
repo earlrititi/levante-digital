@@ -159,8 +159,13 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
       const bounds = hero!.getBoundingClientRect();
       const width = Math.round(bounds.width), height = Math.round(bounds.height);
       const scale = Math.max(width / 1672, height / 941);
-      const rect = { x: (width - 1672 * scale) / 2, y: (height - 941 * scale) / 2,
-        width: curtain.naturalWidth * scale, height: curtain.naturalHeight * scale };
+      // The mobile poster has an explicit centered cover box. Use its laid-out
+      // bounds so GPU grains also match the browser's subpixel rounding on rotation.
+      const imageBounds = curtain.getBoundingClientRect();
+      const rect = width < 900 ? { x: imageBounds.left - bounds.left, y: imageBounds.top - bounds.top,
+        width: imageBounds.width, height: imageBounds.height }
+        : { x: (width - 1672 * scale) / 2, y: (height - 941 * scale) / 2,
+          width: curtain.naturalWidth * scale, height: curtain.naturalHeight * scale };
       const seedsPromise = seedClient.prepareCurtain(curtain, rect, quality, { width, height });
       metrics();
       const seeds = await seedsPromise;

@@ -16,8 +16,9 @@ El hero combina `fondo-def.webp`, noise, las partículas de la cortina y del mar
 y `logo-hero-vector.svg`. El logo permanece estático por encima de toda la animación.
 En escritorio el símbolo y las letras se centran dentro del cuerpo de la cortina,
 con un tamaño anclado al lienzo del fondo para conservar la composición también
-a pantalla completa. En móvil se centra y reduce para
-mantener la marca completa dentro de la pantalla.
+a pantalla completa. En móvil se centra la parte pintada del SVG, compensando
+sus márgenes transparentes. Fondo, cortina y partículas comparten un recorte
+que coloca el centro del cuerpo de la cortina en el centro de la pantalla.
 Fondo y cortina comparten el lienzo original de 1672 × 941: ambos reciben el mismo
 escalado `cover`, centrado horizontal y verticalmente, para preservar su composición
 en escritorio y móvil. La imagen plana de la cortina se muestra antes de play, al pausar

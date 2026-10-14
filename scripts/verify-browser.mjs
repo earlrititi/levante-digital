@@ -94,13 +94,19 @@ async function assertCurtainPoster(target) {
   assert.equal(poster.source, '/assets/images/cortina-def.webp');
   assert.equal(poster.visible, true, 'Pause must display the original curtain image');
   assert.equal(poster.interiorParticles[3], 0, 'The shared HDR target must contain no frozen curtain grains after Pause');
-  const actual = await target.screenshot();
-  const previousDisplay = await target.locator('[data-sand-canvas]').evaluate(canvas => {
-    const value = canvas.style.display; canvas.style.display = 'none'; return value;
-  });
-  let expected;
-  try { expected = await target.screenshot(); }
-  finally { await target.locator('[data-sand-canvas]').evaluate((canvas, value) => canvas.style.display = value, previousDisplay); }
+  // Keep the frame and its collision sparks in the reference. They remain part
+  // of the composition when the curtain returns to its original image.
+  const globallyPaused = await target.locator('[data-sand-hero]').getAttribute('data-sand-paused') === 'true';
+  if (!globallyPaused) await target.locator('[data-sand-toggle]').dispatchEvent('click');
+  let actual, expected;
+  try {
+    actual = await target.screenshot();
+    await target.evaluate(() => window.__sandGpu.redraw(false));
+    expected = await target.screenshot();
+  } finally {
+    await target.evaluate(() => window.__sandGpu.redraw());
+    if (!globallyPaused) await target.locator('[data-sand-toggle]').dispatchEvent('click');
+  }
   const pixels = await target.evaluate(async ({ actual, expected }) => {
     const decode = async bytes => {
       const image = new Image(); image.src = 'data:image/png;base64,' + bytes; await image.decode();
@@ -115,7 +121,9 @@ async function assertCurtainPoster(target) {
     const image = document.querySelector('[data-curtain-image]'), scale = Math.max(hero.width / image.naturalWidth, hero.height / image.naturalHeight);
     const maskCanvas = document.createElement('canvas'); maskCanvas.width = a.width; maskCanvas.height = a.height;
     const context = maskCanvas.getContext('2d', { willReadFrequently: true });
-    context.drawImage(image, (hero.left + (hero.width - image.naturalWidth * scale) / 2) * ratio,
+    const imageRect = image.getBoundingClientRect();
+    if (hero.width < 900) context.drawImage(image, imageRect.left * ratio, imageRect.top * ratio, imageRect.width * ratio, imageRect.height * ratio);
+    else context.drawImage(image, (hero.left + (hero.width - image.naturalWidth * scale) / 2) * ratio,
       (hero.top + (hero.height - image.naturalHeight * scale) / 2) * ratio,
       image.naturalWidth * scale * ratio, image.naturalHeight * scale * ratio);
     const mask = context.getImageData(0, 0, a.width, a.height).data;
@@ -178,18 +186,19 @@ async function logoContainment(target) {
     const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true }); maskContext.drawImage(curtain, 0, 0);
     const mask = maskContext.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
     const h = hero.getBoundingClientRect(), l = logo.getBoundingClientRect();
-    const scale = Math.max(h.width / maskCanvas.width, h.height / maskCanvas.height);
-    const originX = (h.width - maskCanvas.width * scale) / 2, originY = (h.height - maskCanvas.height * scale) / 2;
-    let inside = 0, total = 0, outsideViewport = 0, minX = Infinity, maxX = -Infinity;
-    // Desktop containment includes the full painted symbol and both rows of lettering.
-    const desktop = h.width >= 900, firstX = desktop ? 0 : 548;
-    for (let y = 0; y < 443; y++) for (let x = firstX; x < 1200; x++) {
+    const imageRect = curtain.getBoundingClientRect();
+    const scale = h.width < 900 ? imageRect.width / maskCanvas.width : Math.max(h.width / maskCanvas.width, h.height / maskCanvas.height);
+    const originX = h.width < 900 ? imageRect.left - h.left : (h.width - maskCanvas.width * scale) / 2;
+    const originY = h.width < 900 ? imageRect.top - h.top : (h.height - maskCanvas.height * scale) / 2;
+    let inside = 0, total = 0, outsideViewport = 0, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let y = 0; y < 443; y++) for (let x = 0; x < 1200; x++) {
       if (ink[(y * 1200 + x) * 4 + 3] < 128) continue;
       total++;
       const px = l.left - h.left + (x + .5) / 1200 * l.width;
       const py = l.top - h.top + (y + .5) / 443 * l.height;
       const mx = Math.floor((px - originX) / scale), my = Math.floor((py - originY) / scale);
       minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
       if (px < 0 || py < 0 || px >= h.width || py >= h.height) outsideViewport++;
       if (mx >= 0 && my >= 0 && mx < maskCanvas.width && my < maskCanvas.height
         && mask[(my * maskCanvas.width + mx) * 4 + 3] >= 128) inside++;
@@ -201,8 +210,10 @@ async function logoContainment(target) {
       if (px >= 0 && px < h.width) { curtainLeft = Math.min(curtainLeft, px); curtainRight = Math.max(curtainRight, px); }
     }
     return { viewport: { width: h.width, height: h.height }, logo: { x: l.left - h.left, y: l.top - h.top, width: l.width, height: l.height },
-      scope: desktop ? 'full-logo' : 'lettering', paintedPixels: total, inside, outsideViewport, containment: inside / total,
+      scope: 'full-logo', paintedPixels: total, inside, outsideViewport, containment: inside / total,
       paintedCenterX: (minX + maxX) / 2, curtainCenterX: (curtainLeft + curtainRight) / 2,
+      viewportCenterOffsetX: Math.abs((minX + maxX - h.width) / 2),
+      viewportCenterOffsetY: Math.abs((minY + maxY - h.height) / 2),
       centerOffset: Math.abs((minX + maxX - curtainLeft - curtainRight) / 2) };
   });
 }
@@ -338,9 +349,10 @@ try {
     const background = document.querySelector('.hero__background'), hero = document.querySelector('[data-sand-hero]');
     await Promise.all([image.decode(), background.decode()]);
     const style = getComputedStyle(image), scale = Math.max(hero.clientWidth / 1672, hero.clientHeight / 941);
+    const imageRect = image.getBoundingClientRect(), heroRect = hero.getBoundingClientRect();
     return { count: state.count, gravity: state.gravity, rect: state.rect,
-      expected: { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2,
-        width: 1672 * scale, height: 941 * scale },
+      expected: hero.clientWidth < 900 ? { x: imageRect.left - heroRect.left, y: imageRect.top - heroRect.top, width: imageRect.width, height: imageRect.height }
+        : { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2, width: 1672 * scale, height: 941 * scale },
       source: new URL(image.src).pathname, background: new URL(background.src).pathname,
       sourceSize: [image.naturalWidth, image.naturalHeight], backgroundSize: [background.naturalWidth, background.naturalHeight],
       imageWidth: state.imageWidth, imageHeight: state.imageHeight,
@@ -791,7 +803,7 @@ try {
   await page.evaluate(() => window.scrollTo(0, 0));
 
   results.viewports = [];
-  for (const [width, height] of [[320, 812], [375, 812], [768, 900], [923, 805], [1024, 900], [1440, 900], [1900, 867], [1920, 1080]]) {
+  for (const [width, height] of [[320, 812], [375, 812], [390, 844], [430, 932], [844, 390], [768, 900], [923, 805], [1024, 900], [1440, 900], [1900, 867], [1920, 1080]]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(350);
     await page.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
@@ -804,8 +816,9 @@ try {
     const alignment = await page.evaluate(() => {
       const hero = document.querySelector('[data-sand-hero]'), state = window.__sandGpu.curtain();
       const scale = Math.max(hero.clientWidth / 1672, hero.clientHeight / 941);
-      const expected = { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2,
-        width: 1672 * scale, height: 941 * scale };
+      const image = document.querySelector('[data-curtain-image]'), i = image.getBoundingClientRect(), h = hero.getBoundingClientRect();
+      const expected = hero.clientWidth < 900 ? { x: i.left - h.left, y: i.top - h.top, width: i.width, height: i.height }
+        : { x: (hero.clientWidth - 1672 * scale) / 2, y: (hero.clientHeight - 941 * scale) / 2, width: 1672 * scale, height: 941 * scale };
       return Math.max(...Object.keys(expected).map(key => Math.abs(state.rect[key] - expected[key])));
     });
     assert.ok(alignment < .01, 'Resize must keep the particle curtain aligned with its background');
@@ -814,8 +827,20 @@ try {
     assert.equal(coverage.offscreenFlows, 0);
     assert.equal(await page.locator('[data-logo-image]').isVisible(), true);
     const lettering = await logoContainment(page);
-    assert.ok(lettering.containment >= (width >= 900 ? 1 : .99), `The ${lettering.scope} must remain contained by the curtain at ${width} x ${height}; actual ${(lettering.containment * 100).toFixed(2)}%`);
+    assert.equal(lettering.containment, 1, `The complete logo must remain contained by the curtain at ${width} x ${height}`);
     if (width >= 900) assert.ok(lettering.centerOffset < 12, `The complete logo must remain centered at ${width} x ${height}`);
+    if (width < 900) {
+      assert.ok(lettering.viewportCenterOffsetX < 1 && lettering.viewportCenterOffsetY < 1, 'The painted mobile logo must be centered in both axes');
+      const covered = await page.evaluate(() => {
+        const h = document.querySelector('[data-sand-hero]').getBoundingClientRect();
+        return ['.hero__background', '[data-curtain-image]'].every(selector => {
+          const i = document.querySelector(selector).getBoundingClientRect();
+          return i.left <= h.left + .1 && i.right >= h.right - .1 && i.top <= h.top + .1 && i.bottom >= h.bottom - .1;
+        });
+      });
+      assert.equal(covered, true, 'The centered mobile crop must cover the entire hero without empty edges');
+      await page.screenshot({ path: `artifacts/hero-centered-${width}x${height}.png` });
+    }
     assert.equal(lettering.outsideViewport, 0);
     results.viewports.push({ width, height, ...await metrics(), ...await stateSummary(), curtainCoverage: coverage, lettering });
     if (width === 375) await page.screenshot({ path: 'artifacts/hero-gpu-mobile.png' });

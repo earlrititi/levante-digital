@@ -28,6 +28,10 @@ El marco se anima al cargar. La cascada se inicia exclusivamente al pulsar
 se decodifica su máscara para la simulación, se preparan sus semillas ni se
 crean sus buffers o shaders GPU. Play añade la cascada al motor existente sin
 reiniciar el marco. Pausa y reinicio no activan una cascada que aún está estática.
+El botón circular de la esquina inferior izquierda muestra solo un icono y
+permanece visible: play inicia o
+reanuda la cascada y pausa la congela sin detener el marco. Reanudar conserva
+sus posiciones y velocidades, sin volver a crear semillas ni buffers.
 
 La cortina se reconstruye con 65.536 partículas en escritorio y 16.384 en móvil.
 Solo se preparan columnas y tramos visibles después del recorte `cover`, para

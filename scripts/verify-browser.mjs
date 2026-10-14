@@ -56,15 +56,60 @@ async function assertIdleCurtain(target) {
   assert.equal(idle.playEnabled, true);
   assert.equal(idle.workerJobs, 0);
   assert.equal(idle.imageJobs, 0, 'The curtain bitmap must not be transferred to the worker before Play');
+  await assertCurtainControl(target, false);
   return idle;
 }
-async function playCurtain(target, input = 'click') {
+async function assertCurtainControl(target, playing) {
   const button = target.locator('[data-curtain-play]');
-  if (input === 'keyboard') { await button.focus(); await target.keyboard.press('Enter'); }
+  assert.equal(await button.isVisible(), true, 'The cascade control must remain visible in both playback states');
+  assert.equal((await button.textContent()).trim(), '', 'The cascade control must contain icons only');
+  assert.equal(await button.locator('[data-curtain-play-icon]').isVisible(), !playing);
+  assert.equal(await button.locator('[data-curtain-pause-icon]').isVisible(), playing);
+  assert.match(await button.getAttribute('aria-label'), playing ? /Pausar cascada/i : /(?:Reproducir|Reanudar) cascada/i);
+  const heroBounds = await target.locator('[data-sand-hero]').boundingBox(), buttonBounds = await button.boundingBox();
+  assert.ok(buttonBounds.x - heroBounds.x < heroBounds.width * .25, 'The persistent control must stay in the left quarter of the hero');
+  assert.ok(buttonBounds.y - heroBounds.y + buttonBounds.height > heroBounds.height * .75,
+    'The persistent control must stay in the bottom quarter of the hero');
+}
+async function activateCurtainControl(target, input = 'click', key = 'Enter') {
+  const button = target.locator('[data-curtain-play]');
+  if (input === 'keyboard') { await button.focus(); await target.keyboard.press(key); }
   else if (input === 'touch') await button.tap();
   else await button.click();
+}
+async function playCurtain(target, input = 'click') {
+  await activateCurtainControl(target, input);
   await target.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"]');
-  assert.equal(await button.isVisible(), false, 'Play must give way to the running waterfall');
+  await assertCurtainControl(target, true);
+}
+async function verifyCurtainToggle(target, input = 'click') {
+  const before = await target.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  const seeds = await target.evaluate(() => Array.from(window.__sandGpu.curtain().sources));
+  const jobs = await target.evaluate(() => window.__curtainWorkerJobs ?? 0);
+  await activateCurtainControl(target, input, 'Space');
+  await target.waitForSelector('[data-curtain-state="paused"]');
+  await assertCurtainControl(target, false);
+  const frozen = await target.evaluate(() => Array.from(window.__sandGpu.curtain().positions));
+  const frameTime = Number(await target.locator('[data-sand-hero]').getAttribute('data-sand-time'));
+  await target.waitForTimeout(220);
+  assert.deepEqual(await target.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), frozen,
+    'Pausing the cascade must freeze its actual GPU positions');
+  assert.ok(Number(await target.locator('[data-sand-hero]').getAttribute('data-sand-time')) > frameTime,
+    'The frame must keep moving while only the cascade is paused');
+  await target.screenshot({ path: `artifacts/curtain-persistent-control-paused-${input === 'touch' ? 'mobile' : 'desktop'}.png` });
+  await activateCurtainControl(target, input);
+  await target.waitForSelector('[data-curtain-state="playing"]');
+  await assertCurtainControl(target, true);
+  await target.waitForTimeout(220);
+  assert.notDeepEqual(await target.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), frozen,
+    'Play must resume the same waterfall simulation');
+  assert.deepEqual(await target.evaluate(() => Array.from(window.__sandGpu.curtain().sources)), seeds);
+  const after = await target.locator('[data-sand-hero]').evaluate(el => ({ ...el.dataset }));
+  assert.equal(after.curtainPreparations, before.curtainPreparations, 'Resuming must not prepare new seeds');
+  assert.equal(await target.evaluate(() => window.__curtainWorkerJobs ?? 0), jobs, 'Playback toggles must reuse the worker result');
+  assert.equal(after.curtainParticles, before.curtainParticles);
+  return { input, frameTimeBefore: frameTime, frameTimeAfter: Number(after.sandTime),
+    preparations: Number(after.curtainPreparations), workerJobs: jobs, particles: Number(after.curtainParticles) };
 }
 async function logoLetterContainment(target) {
   return target.evaluate(async () => {
@@ -164,6 +209,31 @@ try {
     return contacts;
   });
   assert.equal(activationContacts, 0, 'Activating Play must not create cursor collisions in the newborn waterfall');
+  results.desktopCurtainToggle = await verifyCurtainToggle(page, 'keyboard');
+  await page.locator('[data-sand-toggle]').click();
+  await page.waitForSelector('[data-sand-paused="true"][data-curtain-state="paused"]');
+  await assertCurtainControl(page, false);
+  await activateCurtainControl(page);
+  await page.waitForSelector('[data-sand-paused="false"][data-curtain-state="playing"]');
+  await assertCurtainControl(page, true);
+  assert.equal(Number((await metrics()).curtainPreparations), 1);
+  results.curtainPlayResumesGlobalPause = true;
+  await activateCurtainControl(page);
+  await page.waitForSelector('[data-curtain-state="paused"]');
+  await page.locator('[data-sand-toggle]').click();
+  await page.locator('[data-sand-toggle]').click();
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.waitForSelector('[data-sand-paused="false"][data-curtain-state="paused"]');
+  const locallyPaused = await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions));
+  const locallyPausedFrameTime = Number((await metrics()).sandTime);
+  await page.waitForTimeout(220);
+  assert.deepEqual(await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), locallyPaused,
+    'Global resume must preserve an explicit cascade pause');
+  assert.ok(Number((await metrics()).sandTime) > locallyPausedFrameTime);
+  await assertCurtainControl(page, false);
+  await activateCurtainControl(page);
+  await page.waitForSelector('[data-curtain-state="playing"]');
+  results.localCurtainPauseSurvivesGlobalToggle = true;
   await page.screenshot({ path: 'artifacts/curtain-play-playing-desktop.png' });
   assert.equal(results.initial.curtainEffect, 'particle-waterfall');
   assert.equal(Number(results.initial.curtainGravity), 981);
@@ -669,6 +739,25 @@ try {
     if (width === 923) await page.screenshot({ path: 'artifacts/curtain-play-playing-halfscreen.png' });
     if (width === 1900) await page.screenshot({ path: 'artifacts/curtain-play-playing-fullscreen.png' });
   }
+  await activateCurtainControl(page);
+  await page.waitForSelector('[data-curtain-state="paused"]');
+  await page.setViewportSize({ width: 1900, height: 867 });
+  await page.waitForTimeout(350);
+  await page.waitForSelector('[data-sand-ready="true"][data-curtain-ready="true"][data-curtain-state="paused"]');
+  await assertCurtainControl(page, false);
+  const resizedPaused = await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions));
+  const resizedFrameTime = Number((await metrics()).sandTime);
+  await page.waitForTimeout(220);
+  assert.deepEqual(await page.evaluate(() => Array.from(window.__sandGpu.curtain().positions)), resizedPaused,
+    'Rebuilding the viewport must preserve a paused cascade');
+  assert.ok(Number((await metrics()).sandTime) > resizedFrameTime);
+  const resizedPreparations = (await metrics()).curtainPreparations;
+  await activateCurtainControl(page);
+  await page.waitForSelector('[data-curtain-state="playing"]');
+  await assertCurtainControl(page, true);
+  assert.equal((await metrics()).curtainPreparations, resizedPreparations);
+  results.pausedCurtainSurvivesResize = true;
+  await page.screenshot({ path: 'artifacts/curtain-persistent-control-desktop.png' });
   results.idleViewports = [];
   for (const [width, height, name] of [[923, 805, 'halfscreen'], [1900, 867, 'fullscreen']]) {
     const idlePage = await browser.newPage({ viewport: { width, height } });
@@ -705,6 +794,8 @@ try {
     return contacts;
   });
   assert.equal(touchActivationContacts, 0, 'Touching Play must not disturb the waterfall or launch a cursor sweep');
+  results.mobileCurtainToggle = await verifyCurtainToggle(touchPage, 'touch');
+  await touchPage.screenshot({ path: 'artifacts/curtain-persistent-control-mobile.png' });
   assert.equal(await touchPage.locator('[data-logo-image]').isVisible(), true);
   assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-ready'), 'true');
   assert.equal(await touchPage.locator('[data-sand-hero]').getAttribute('data-curtain-effect'), 'particle-waterfall');

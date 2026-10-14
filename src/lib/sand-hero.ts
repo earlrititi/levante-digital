@@ -28,19 +28,23 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   const resetButton = document.querySelector<HTMLButtonElement>('[data-sand-reset]');
   const toggleButton = document.querySelector<HTMLButtonElement>('[data-sand-toggle]');
   const playButton = document.querySelector<HTMLButtonElement>('[data-curtain-play]');
-  const playLabel = playButton?.querySelector<HTMLElement>('[data-curtain-play-label]');
+  const playIcon = playButton?.querySelector<SVGElement>('[data-curtain-play-icon]');
+  const pauseIcon = playButton?.querySelector<SVGElement>('[data-curtain-pause-icon]');
   if (!hero || !canvas || !emitter) return;
   type CurtainState = 'idle' | 'loading' | 'playing' | 'paused' | 'unavailable';
   let curtainState: CurtainState = 'idle';
   function setCurtainState(state: CurtainState) {
     curtainState = state; hero!.dataset.curtainState = state;
     if (!playButton) return;
-    playButton.hidden = state === 'playing' || state === 'paused' || state === 'unavailable';
+    playButton.hidden = state === 'unavailable';
     playButton.disabled = state === 'loading' || state === 'unavailable';
     playButton.setAttribute('aria-busy', String(state === 'loading'));
-    const label = state === 'loading' ? 'Preparando cascada…' : 'Reproducir cascada';
+    const label = state === 'loading' ? 'Preparando cascada…' : state === 'playing' ? 'Pausar cascada'
+      : state === 'paused' ? 'Reanudar cascada' : 'Reproducir cascada';
     playButton.setAttribute('aria-label', label);
-    if (playLabel) playLabel.textContent = label;
+    playButton.title = label;
+    playIcon?.toggleAttribute('data-hidden', state === 'playing');
+    pauseIcon?.toggleAttribute('data-hidden', state !== 'playing');
   }
   setCurtainState('idle');
   hero.dataset.curtainReady = 'false'; hero.dataset.curtainParticles = '0';
@@ -63,7 +67,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   let engine: GpuSand | undefined;
   let seedClient: ParticleSeedClient | undefined;
   let quality: ParticleQuality | undefined;
-  let paused = false, disposed = false, imagesReady = false, curtainStarted = false;
+  let paused = false, disposed = false, imagesReady = false, curtainStarted = false, curtainPaused = false;
   let curtainVersion = 0;
   let animation = 0, lastTime = 0, accumulator = 0, buildVersion = 0;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -97,6 +101,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     metric('logoRendering', 'vector');
     metric('curtainEffect', 'particle-waterfall');
     metric('curtainParticles', String(engine?.curtainCount ?? 0));
+    metric('curtainPaused', String(paused || curtainPaused));
     metric('curtainPreparations', String(seedClient?.curtainPreparations ?? 0));
     metric('curtainGravity', '981');
   }
@@ -137,6 +142,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
   function updateStatus() {
     if (curtainState === 'loading') setStatus('Preparando la cascada…');
     else if (paused) setStatus('Animación pausada.');
+    else if (curtainState === 'paused') setStatus('Cascada pausada. Pulsa play para reanudarla.');
     else if (curtainState === 'playing') setStatus('La cortina cae en partículas. Interrumpe la cascada con el cursor.');
     else setStatus('Pulsa reproducir para iniciar la cascada. El marco ya responde al cursor.');
   }
@@ -160,8 +166,9 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
       if (!isCurrent() || !await waitUntilVisible() || !isCurrent()) return;
       await target.attachCurtain(curtain, rect, seeds);
       if (!isCurrent()) return;
+      target.setCurtainPaused(curtainPaused);
       target.draw(cursor); hero!.dataset.curtainReady = 'true';
-      setCurtainState(paused ? 'paused' : 'playing'); metrics(); updateStatus(); start();
+      setCurtainState(paused || curtainPaused ? 'paused' : 'playing'); metrics(); updateStatus(); start();
     } catch {
       if (!isCurrent()) return;
       hero!.dataset.curtainReady = 'false'; setCurtainState('idle'); metrics();
@@ -169,7 +176,16 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     }
   }
   function onPlay() {
-    if (disposed || curtainState === 'loading' || engine?.curtainCount) return;
+    if (disposed || curtainState === 'loading') return;
+    if (engine?.curtainCount) {
+      cursor.active = false;
+      curtainPaused = curtainState === 'playing';
+      engine.setCurtainPaused(curtainPaused);
+      if (!curtainPaused && paused) onToggle();
+      setCurtainState(paused || curtainPaused ? 'paused' : 'playing');
+      metrics(); updateStatus(); start();
+      return;
+    }
     curtainStarted = true; cursor.active = false;
     setCurtainState('loading'); updateStatus();
     // Early clicks retain the user's intent while the frame finishes loading.
@@ -240,7 +256,7 @@ export async function initSandHero(): Promise<(() => void) | undefined> {
     toggleButton!.setAttribute('aria-pressed', String(paused));
     toggleButton!.textContent = paused ? 'Reanudar animación' : 'Pausar animación';
     if (paused) stop(); else start();
-    if (engine?.curtainCount) setCurtainState(paused ? 'paused' : 'playing');
+    if (engine?.curtainCount) setCurtainState(paused || curtainPaused ? 'paused' : 'playing');
     updateStatus();
   }
   function onReset() { cursor.active = false; engine?.reset(); engine?.draw(cursor); metrics(); }

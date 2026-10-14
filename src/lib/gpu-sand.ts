@@ -34,6 +34,7 @@ export class GpuSand {
   private sparks!: Mesh;
   private glow?: ParticleGlow;
   private curtain?: GpuCurtain;
+  private curtainPaused = false;
   private positionUniform!: Uniform<Texture>;
   private velocityUniform!: Uniform<Texture>;
   private computePosition!: Uniform<Texture>;
@@ -183,6 +184,8 @@ export class GpuSand {
 
   get curtainCount() { return this.curtain?.count ?? 0; }
 
+  setCurtainPaused(paused: boolean) { this.curtainPaused = paused; }
+
   async attachCurtain(image: HTMLImageElement, rect: FrameRect, prepared?: CurtainSeeds) {
     const { GpuCurtain: CurtainEngine } = await import('./gpu-curtain');
     if (this.disposed || this.gl.isContextLost()) throw new Error('Particle engine is no longer available');
@@ -229,7 +232,7 @@ export class GpuSand {
       this.renderer.render({ scene: this.sparkCompute, target: this.sparkWrite, clear: false, sort: false, frustumCull: false });
       const previousSpark = this.sparkRead; this.sparkRead = this.sparkWrite; this.sparkWrite = previousSpark;
     }
-    this.curtain?.step(dt, cursor);
+    if (!this.curtainPaused) this.curtain?.step(dt, cursor);
   }
 
   draw(cursor: GpuCursor) {
